@@ -1,0 +1,70 @@
+
+/ {
+    aliases {
+        ch375-a = &usart2;
+        ch375-b = &usart3;
+        log-uart = &uart4;
+    };
+
+    ch375_pins {
+        compatible = "gpio-keys";
+        ch375a_int: ch375a_int {
+            gpios = <&gpioe 14 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+            label = "CH375A_INT";
+        };
+        ch375b_int: ch375b_int {
+            gpios = <&gpioe 15 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+            label = "CH375B_INT";
+        };
+    };
+
+    leds {
+        green_led: led_green {
+            gpios = <&gpiod 12 GPIO_ACTIVE_HIGH>;
+            label = "Green LED";
+        };
+        orange_led: led_orange {
+            gpios = <&gpiod 13 GPIO_ACTIVE_HIGH>;
+            label = "Orange LED";
+        };
+        red_led: led_red {
+            gpios = <&gpiod 14 GPIO_ACTIVE_HIGH>;
+            label = "Red LED";
+        };
+        blue_led: led_blue {
+            gpios = <&gpiod 15 GPIO_ACTIVE_HIGH>;
+            label = "Blue LED";
+        };
+    };
+};
+
+&usart2 {
+    status = "okay";
+    current-speed = <9600>;
+    /* 9-bit mode configuration */
+    data-bits = <9>;
+    pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
+    pinctrl-names = "default";
+};
+
+&usart3 {
+    status = "okay";
+    current-speed = <9600>;
+    /* 9-bit mode configuration */
+    data-bits = <9>;
+    pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
+    pinctrl-names = "default";
+};
+
+&uart4 {
+    status = "okay";
+    current-speed = <115200>;
+    pinctrl-0 = <&uart4_tx_pc10 &uart4_rx_pc11>;
+    pinctrl-names = "default";
+};
+
+&usb_otg_fs {
+    status = "okay";
+    pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
+    pinctrl-names = "default";
+};
