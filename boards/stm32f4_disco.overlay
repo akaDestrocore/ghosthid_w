@@ -3,32 +3,34 @@
     chosen {
         zephyr,console = &usart2;
         zephyr,shell-uart = &usart2;
-        zephyr,sram = &sram0;
-        zephyr,flash = &flash0;
     };
-
+    
+    /* Define CH375 devices - simple nodes for GPIO reference only */
     ch375a: ch375a {
-        compatible = "qdm,ch375";
+        compatible = "gpio-leds";  /* Use gpio-leds which accepts gpios property */
         status = "okay";
-        uart = <&usart2>;
-        int-gpios = <&gpioc 13 GPIO_ACTIVE_LOW>; // Adjust pin as needed
-        baud-rate = <9600>;
+        
+        /* INT pin - we'll reference this in code */
+        gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
+        label = "CH375A_INT";
     };
-
+    
     ch375b: ch375b {
-        compatible = "qdm,ch375";
+        compatible = "gpio-leds";
         status = "okay";
-        uart = <&usart3>;
-        int-gpios = <&gpioc 14 GPIO_ACTIVE_LOW>; // Adjust pin as needed
-        baud-rate = <9600>;
+        
+        gpios = <&gpioc 14 GPIO_ACTIVE_LOW>;
+        label = "CH375B_INT";
     };
 };
 
+/* Configure UARTs - these ARE supported by Zephyr */
 &usart2 {
     pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
     pinctrl-names = "default";
     current-speed = <9600>;
     status = "okay";
+    /* Note: 9-bit mode will be configured programmatically */
 };
 
 &usart3 {
@@ -38,6 +40,7 @@
     status = "okay";
 };
 
+/* Log UART */
 &uart4 {
     pinctrl-0 = <&uart4_tx_pa0 &uart4_rx_pa1>;
     pinctrl-names = "default";
@@ -45,6 +48,18 @@
     status = "okay";
 };
 
+/* USB OTG FS for device mode */
 &usbotg_fs {
+    status = "okay";
+    pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
+    pinctrl-names = "default";
+};
+
+/* GPIO ports */
+&gpioc {
+    status = "okay";
+};
+
+&gpioe {
     status = "okay";
 };

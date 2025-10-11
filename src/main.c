@@ -1,4 +1,4 @@
-/* Main application for USB HID Proxy on Zephyr */
+/* Main application - Zephyr style with proper device tree usage */
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
@@ -7,7 +7,6 @@
 #include <zephyr/usb/usb_device.h>
 #include <zephyr/usb/class/usb_hid.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/byteorder.h>
 
 #include "ch375/ch375.h"
 #include "ch375/ch375_host.h"
@@ -20,14 +19,12 @@
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 #define CH375_MODULE_NUM 2
-#define STACK_SIZE 2048
-#define PRIORITY 7
 
-typedef struct device_input {
+/* Device context structure */
+typedef struct {
     const char *name;
     const struct device *uart_dev;
-    const struct device *gpio_dev;
-    gpio_pin_t int_pin;
+    struct gpio_dt_spec int_gpio;
     
     struct ch375_context *ch375_ctx;
     struct usb_device usbdev;
@@ -41,66 +38,65 @@ typedef struct device_input {
     uint8_t interface_num;
 } device_input_t;
 
+/* Global state */
 static device_input_t s_arr_devin[CH375_MODULE_NUM];
 static struct agp_context *s_agp_ctx;
 static uint8_t s_enable_gun_press;
 static uint8_t s_started_gun_press;
 
-/* Work queue for handling USB HID processing */
-K_THREAD_STACK_DEFINE(hid_stack, STACK_SIZE);
+/* Thread stacks */
+K_THREAD_STACK_DEFINE(hid_stack, 2048);
 struct k_work_q hid_work_q;
 
-/* Semaphores for synchronization */
-K_SEM_DEFINE(devin_ready_sem, 0, 1);
-
-/* USB HID report descriptors (will be populated from connected devices) */
-static uint8_t mouse_report_desc[256];
-static uint8_t keyboard_report_desc[256];
-static uint16_t mouse_report_desc_len;
-static uint16_t keyboard_report_desc_len;
-
-/* USB HID callbacks for device mode */
-static void hid_int_ep_in(void)
+/* Device initialization using device tree */
+static int init_device_input_dt(device_input_t *devin, 
+                                const char *uart_name,
+                                const struct gpio_dt_spec *int_gpio,
+                                const char *dev_name,
+                                uint8_t interface_num)
 {
-    /* Handle IN endpoint interrupt */
-}
-
-static void hid_int_ep_out(uint8_t *buf, size_t len)
-{
-    /* Handle OUT endpoint data */
-}
-
-static int hid_get_report(struct usb_setup_packet *setup, int32_t *len, uint8_t **data)
-{
-    /* Handle GET_REPORT request */
-    return 0;
-}
-
-static int hid_set_report(struct usb_setup_packet *setup, int32_t *len, uint8_t **data)
-{
-    /* Handle SET_REPORT request */
-    return 0;
-}
-
-static const struct hid_ops hid_ops = {
-    .int_in_ready = hid_int_ep_in,
-    .int_out_ready = hid_int_ep_out,
-    .get_report = hid_get_report,
-    .set_report = hid_set_report,
-};
-
-/* Initialize UART with 9-bit mode for CH375 */
-static int uart_init_9bit(const struct device *uart_dev, uint32_t baudrate)
-{
-    struct uart_config cfg = {
-        .baudrate = baudrate,
-        .parity = UART_CFG_PARITY_NONE,
-        .stop_bits = UART_CFG_STOP_BITS_1,
-        .flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
-        .data_bits = UART_CFG_DATA_BITS_9,  /* 9-bit mode */
-    };
+    int ret;
     
-    return uart_configure(uart_dev, &cfg);
+    devin->name = dev_name;
+    devin->interface_num = interface_num;
+    devin->int_gpio = *int_gpio;
+    
+    /* Get UART device from device tree */
+    devin->uart_dev = device_get_binding(uart_name);
+    if (!devin->uart_dev) {
+        LOG_ERR("Cannot find UART device %s", uart_name);
+        return -ENODEV;
+    }
+    
+    LOG_INF("Found UART device: %s", uart_name);
+    
+    /* Initialize CH375 hardware (includes 9-bit UART config) */
+    ret = ch375_hw_init(devin->name,
+                       devin->uart_dev,
+                       devin->int_gpio,
+                       CH375_DEFAULT_BAUDRATE,
+                       &devin->ch375_ctx);
+    if (ret < 0) {
+        LOG_ERR("Failed to init CH375 hardware: %d", ret);
+        return ret;
+    }
+    
+    /* Initialize CH375 in host mode */
+    ret = ch375_host_init(devin->ch375_ctx, CH375_WORK_BAUDRATE);
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Failed to initialize CH375 host: %d", ret);
+        return -EIO;
+    }
+    
+    /* Reconfigure UART for working baudrate */
+    ret = ch375_hw_set_baudrate(devin->ch375_ctx, CH375_WORK_BAUDRATE);
+    if (ret < 0) {
+        LOG_ERR("Failed to set working baudrate: %d", ret);
+        return ret;
+    }
+    
+    LOG_INF("Initialized %s", devin->name);
+    return 0;
 }
 
 /* Process mouse HID reports */
@@ -251,76 +247,6 @@ static void hid_work_handler(struct k_work *work)
 
 K_WORK_DEFINE(hid_work, hid_work_handler);
 
-/* Initialize device input */
-static int init_device_input(device_input_t *devin, const char *uart_name,
-                            const char *gpio_name, gpio_pin_t int_pin,
-                            const char *dev_name, uint8_t interface_num)
-{
-    int ret;
-    
-    devin->name = dev_name;
-    devin->interface_num = interface_num;
-    devin->int_pin = int_pin;
-    
-    /* Get UART device */
-    devin->uart_dev = device_get_binding(uart_name);
-    if (!devin->uart_dev) {
-        LOG_ERR("Cannot find UART device %s", uart_name);
-        return -ENODEV;
-    }
-    
-    /* Configure UART for 9-bit mode at default baudrate */
-    ret = uart_init_9bit(devin->uart_dev, CH375_DEFAULT_BAUDRATE);
-    if (ret) {
-        LOG_ERR("Failed to configure UART %s: %d", uart_name, ret);
-        return ret;
-    }
-    
-    /* Get GPIO device */
-    devin->gpio_dev = device_get_binding(gpio_name);
-    if (!devin->gpio_dev) {
-        LOG_ERR("Cannot find GPIO device %s", gpio_name);
-        return -ENODEV;
-    }
-    
-    /* Configure interrupt pin */
-    ret = gpio_pin_configure(devin->gpio_dev, devin->int_pin,
-                            GPIO_INPUT | GPIO_PULL_UP);
-    if (ret) {
-        LOG_ERR("Failed to configure INT pin: %d", ret);
-        return ret;
-    }
-    
-    /* Create CH375 context */
-    ret = ch375_open_context(&devin->ch375_ctx,
-                            ch375_write_cmd,
-                            ch375_write_data,
-                            ch375_read_data,
-                            ch375_query_int,
-                            devin);
-    if (ret != CH375_SUCCESS) {
-        LOG_ERR("Failed to create CH375 context: %d", ret);
-        return -EIO;
-    }
-    
-    /* Initialize CH375 in host mode */
-    ret = ch375_host_init(devin->ch375_ctx, CH375_WORK_BAUDRATE);
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("Failed to initialize CH375 host: %d", ret);
-        return -EIO;
-    }
-    
-    /* Reconfigure UART for working baudrate */
-    ret = uart_init_9bit(devin->uart_dev, CH375_WORK_BAUDRATE);
-    if (ret) {
-        LOG_ERR("Failed to reconfigure UART: %d", ret);
-        return ret;
-    }
-    
-    LOG_INF("Initialized %s", devin->name);
-    return 0;
-}
-
 /* Wait for device connection and enumerate */
 static int wait_and_enumerate_device(device_input_t *devin)
 {
@@ -419,37 +345,42 @@ static int init_usb_device(void)
     return 0;
 }
 
-void main(void)
+int main(void)
 {
     int ret;
     
+    /* Define INT GPIO specs from device tree */
+    /* Use 'gpios' property instead of 'int-gpios' since we're using gpio-leds compatible */
+    static const struct gpio_dt_spec ch375a_int = GPIO_DT_SPEC_GET(DT_NODELABEL(ch375a), gpios);
+    static const struct gpio_dt_spec ch375b_int = GPIO_DT_SPEC_GET(DT_NODELABEL(ch375b), gpios);
+    
     LOG_INF("USB HID Proxy starting...");
     
-    /* Initialize device inputs */
-    ret = init_device_input(&s_arr_devin[0], "UART_2", "GPIOE", 14, "CH375A", 0);
+    /* Initialize device inputs using device tree */
+    ret = init_device_input_dt(&s_arr_devin[0], "USART_2", &ch375a_int, "CH375A", 0);
     if (ret) {
         LOG_ERR("Failed to initialize CH375A");
-        return;
+        return ret;
     }
     
-    ret = init_device_input(&s_arr_devin[1], "UART_3", "GPIOE", 15, "CH375B", 1);
+    ret = init_device_input_dt(&s_arr_devin[1], "USART_3", &ch375b_int, "CH375B", 1);
     if (ret) {
         LOG_ERR("Failed to initialize CH375B");
-        return;
+        return ret;
     }
     
     /* Initialize auto gun press */
     ret = agp_open(&s_agp_ctx);
     if (ret) {
         LOG_ERR("Failed to initialize auto gun press");
-        return;
+        return ret;
     }
     
     /* Initialize work queue */
     k_work_queue_init(&hid_work_q);
     k_work_queue_start(&hid_work_q, hid_stack,
                        K_THREAD_STACK_SIZEOF(hid_stack),
-                       PRIORITY, NULL);
+                       7, NULL);
     
     while (1) {
         LOG_INF("Waiting for all devices to connect...");
@@ -475,9 +406,10 @@ void main(void)
         /* Start HID processing */
         k_work_submit_to_queue(&hid_work_q, &hid_work);
         
-        /* Wait for disconnection */
-        k_sem_take(&devin_ready_sem, K_FOREVER);
+        /* Keep running - disconnection will be handled in work handler */
+        k_sleep(K_FOREVER);
     }
     
     agp_close(s_agp_ctx);
+    return 0;
 }
