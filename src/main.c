@@ -50,7 +50,8 @@ struct k_work_q hid_work_q;
 
 /* Device initialization using device tree */
 static int init_device_input_dt(device_input_t *devin, 
-                                const char *uart_name,
+                                const char *uart_label,  /* Keep for logging */
+                                const struct device *uart_dev,  /* Pass device directly */
                                 const struct gpio_dt_spec *int_gpio,
                                 const char *dev_name,
                                 uint8_t interface_num)
@@ -60,17 +61,16 @@ static int init_device_input_dt(device_input_t *devin,
     devin->name = dev_name;
     devin->interface_num = interface_num;
     devin->int_gpio = *int_gpio;
+    devin->uart_dev = uart_dev;  /* Use passed device */
     
-    /* Get UART device from device tree */
-    devin->uart_dev = device_get_binding(uart_name);
-    if (!devin->uart_dev) {
-        LOG_ERR("Cannot find UART device %s", uart_name);
+    if (!device_is_ready(devin->uart_dev)) {
+        LOG_ERR("UART device %s not ready", uart_label);
         return -ENODEV;
     }
     
-    LOG_INF("Found UART device: %s", uart_name);
+    LOG_INF("Found UART device: %s", uart_label);
     
-    /* Initialize CH375 hardware (includes 9-bit UART config) */
+    /* Rest remains the same */
     ret = ch375_hw_init(devin->name,
                        devin->uart_dev,
                        devin->int_gpio,
@@ -349,67 +349,76 @@ int main(void)
 {
     int ret;
     
-    /* Define INT GPIO specs from device tree */
-    /* Use 'gpios' property instead of 'int-gpios' since we're using gpio-leds compatible */
-    static const struct gpio_dt_spec ch375a_int = GPIO_DT_SPEC_GET(DT_NODELABEL(ch375a), gpios);
-    static const struct gpio_dt_spec ch375b_int = GPIO_DT_SPEC_GET(DT_NODELABEL(ch375b), gpios);
+    /* Define INT GPIO specs directly - PC13 and PC14 */
+    static const struct gpio_dt_spec ch375a_int = {
+        .port = DEVICE_DT_GET(DT_NODELABEL(gpioc)),
+        .pin = 13,
+        .dt_flags = GPIO_ACTIVE_LOW
+    };
     
-    LOG_INF("USB HID Proxy starting...");
+    static const struct gpio_dt_spec ch375b_int = {
+        .port = DEVICE_DT_GET(DT_NODELABEL(gpioc)),
+        .pin = 14,
+        .dt_flags = GPIO_ACTIVE_LOW
+    };
     
-    /* Initialize device inputs using device tree */
-    ret = init_device_input_dt(&s_arr_devin[0], "USART_2", &ch375a_int, "CH375A", 0);
+    LOG_INF("=================================");
+    LOG_INF("USB HID Proxy Starting...");
+    LOG_INF("=================================");
+    
+    /* Test GPIO access */
+    const struct device *gpioc = DEVICE_DT_GET(DT_NODELABEL(gpioc));
+    if (!device_is_ready(gpioc)) {
+        LOG_ERR("GPIO C not ready!");
+        return -1;
+    }
+    LOG_INF("GPIO C is ready");
+    
+    /* Get UART devices using DT macros - THIS IS THE FIX */
+    const struct device *uart2 = DEVICE_DT_GET(DT_NODELABEL(usart2));
+    if (!device_is_ready(uart2)) {
+        LOG_ERR("USART2 not ready");
+        return -1;
+    }
+    LOG_INF("USART2 ready");
+    
+    const struct device *uart3 = DEVICE_DT_GET(DT_NODELABEL(usart3));
+    if (!device_is_ready(uart3)) {
+        LOG_ERR("USART3 not ready");
+        return -1;
+    }
+    LOG_INF("USART3 ready");
+    
+    const struct device *uart4 = DEVICE_DT_GET(DT_NODELABEL(uart4));
+    if (!device_is_ready(uart4)) {
+        LOG_ERR("UART4 not ready");
+        return -1;
+    }
+    LOG_INF("UART4 ready");
+    
+    LOG_INF("=================================");
+    LOG_INF("Basic tests complete");
+    LOG_INF("=================================");
+
+    /* Initialize device inputs */
+    ret = init_device_input_dt(&s_arr_devin[0], "USART2", uart2, &ch375a_int, "CH375A", 0);
     if (ret) {
         LOG_ERR("Failed to initialize CH375A");
         return ret;
     }
-    
-    ret = init_device_input_dt(&s_arr_devin[1], "USART_3", &ch375b_int, "CH375B", 1);
+
+    ret = init_device_input_dt(&s_arr_devin[1], "USART3", uart3, &ch375b_int, "CH375B", 1);
     if (ret) {
         LOG_ERR("Failed to initialize CH375B");
         return ret;
     }
+
     
-    /* Initialize auto gun press */
-    ret = agp_open(&s_agp_ctx);
-    if (ret) {
-        LOG_ERR("Failed to initialize auto gun press");
-        return ret;
-    }
-    
-    /* Initialize work queue */
-    k_work_queue_init(&hid_work_q);
-    k_work_queue_start(&hid_work_q, hid_stack,
-                       K_THREAD_STACK_SIZEOF(hid_stack),
-                       7, NULL);
-    
+    /* Simple loop */
     while (1) {
-        LOG_INF("Waiting for all devices to connect...");
-        
-        /* Wait for all devices to connect */
-        for (int i = 0; i < CH375_MODULE_NUM; i++) {
-            ret = wait_and_enumerate_device(&s_arr_devin[i]);
-            if (ret) {
-                LOG_ERR("Failed to enumerate device %d", i);
-                k_msleep(1000);
-                continue;
-            }
-        }
-        
-        /* Initialize USB device mode */
-        ret = init_usb_device();
-        if (ret) {
-            LOG_ERR("Failed to initialize USB device");
-            k_msleep(1000);
-            continue;
-        }
-        
-        /* Start HID processing */
-        k_work_submit_to_queue(&hid_work_q, &hid_work);
-        
-        /* Keep running - disconnection will be handled in work handler */
-        k_sleep(K_FOREVER);
+        LOG_INF("Heartbeat...");
+        k_msleep(2000);
     }
     
-    agp_close(s_agp_ctx);
     return 0;
 }

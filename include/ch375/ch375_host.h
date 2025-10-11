@@ -29,11 +29,6 @@ enum ch375_host_errno {
 /* USB Control Setup Size */
 #define CONTROL_SETUP_SIZE      8
 
-/* CH375 Retry Times */
-#define CH375_RETRY_TIMES_ZERO      0
-#define CH375_RETRY_TIMES_2MS       1
-#define CH375_RETRY_TIMES_INFINITY  2
-
 /* USB Endpoint Structure */
 struct usb_endpoint {
     uint8_t  ep_num;

@@ -1,36 +1,16 @@
-
 / {
     chosen {
-        zephyr,console = &usart2;
-        zephyr,shell-uart = &usart2;
-    };
-    
-    /* Define CH375 devices - simple nodes for GPIO reference only */
-    ch375a: ch375a {
-        compatible = "gpio-leds";  /* Use gpio-leds which accepts gpios property */
-        status = "okay";
-        
-        /* INT pin - we'll reference this in code */
-        gpios = <&gpioc 13 GPIO_ACTIVE_LOW>;
-        label = "CH375A_INT";
-    };
-    
-    ch375b: ch375b {
-        compatible = "gpio-leds";
-        status = "okay";
-        
-        gpios = <&gpioc 14 GPIO_ACTIVE_LOW>;
-        label = "CH375B_INT";
+        zephyr,console = &uart4;
+        zephyr,shell-uart = &uart4;
     };
 };
 
-/* Configure UARTs - these ARE supported by Zephyr */
+/* Configure UARTs for CH375 */
 &usart2 {
     pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
     pinctrl-names = "default";
     current-speed = <9600>;
     status = "okay";
-    /* Note: 9-bit mode will be configured programmatically */
 };
 
 &usart3 {
@@ -61,5 +41,13 @@
 };
 
 &gpioe {
+    status = "okay";
+};
+
+&gpioa {
+    status = "okay";
+};
+
+&gpiob {
     status = "okay";
 };
