@@ -103,51 +103,6 @@ static int uart_init_9bit(const struct device *uart_dev, uint32_t baudrate)
     return uart_configure(uart_dev, &cfg);
 }
 
-/* CH375 callback functions using native Zephyr UART API */
-int ch375_write_cmd(struct ch375_context *ctx, uint8_t cmd)
-{
-    device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
-    uint16_t data = CH375_CMD(cmd);  /* Set bit 8 for command */
-    
-    /* Send 9-bit data */
-    uart_poll_out(devin->uart_dev, data & 0xFF);
-    uart_poll_out_u16(devin->uart_dev, data);
-    
-    return CH375_SUCCESS;
-}
-
-int ch375_write_data(struct ch375_context *ctx, uint8_t data)
-{
-    device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
-    uint16_t value = CH375_DATA(data);  /* Clear bit 8 for data */
-    
-    uart_poll_out_u16(devin->uart_dev, value);
-    
-    return CH375_SUCCESS;
-}
-
-int ch375_read_data(struct ch375_context *ctx, uint8_t *data)
-{
-    device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
-    uint16_t value;
-    int ret;
-    
-    ret = uart_poll_in_u16(devin->uart_dev, &value);
-    if (ret == 0) {
-        *data = value & 0xFF;
-        return CH375_SUCCESS;
-    }
-    
-    return CH375_ERROR;
-}
-
-int ch375_query_int(struct ch375_context *ctx)
-{
-    device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
-    int val = gpio_pin_get(devin->gpio_dev, devin->int_pin);
-    return (val == 0) ? 1 : 0;  /* Active low */
-}
-
 /* Process mouse HID reports */
 static int handle_mouse(struct hid_mouse *mouse, uint8_t interface_num)
 {
