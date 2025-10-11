@@ -16,7 +16,7 @@
 
 /* USB Descriptor types */
 #define USB_DESC_DEVICE         0x01
-#define USB_DESC_CONFIGURATION  0x02
+#define USB_DT_CONFIGURATION  0x02
 #define USB_DESC_STRING         0x03
 #define USB_DESC_INTERFACE      0x04
 #define USB_DESC_ENDPOINT       0x05

@@ -1,196 +1,165 @@
-/* CH375 UART Driver with 9-bit mode support for Zephyr */
+/* CH375 Hardware Abstraction Callbacks for Zephyr */
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
-#include <string.h>
 
+#include "ch375/ch375.h"
 #include "ch375/ch375_uart.h"
 
-LOG_MODULE_REGISTER(ch375_uart, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(ch375_hal, LOG_LEVEL_DBG);
 
-/* UART 9-bit mode implementation using Zephyr's native API */
+/* Device context - stores UART device and GPIO spec */
+typedef struct {
+    const char *name;
+    const struct device *uart_dev;
+    struct gpio_dt_spec int_gpio;
+} ch375_hw_context_t;
 
-int uart_poll_out_u16(const struct device *dev, uint16_t out_data)
+/* CH375 write command callback - uses native 9-bit UART */
+static int ch375_write_cmd_cb(struct ch375_context *ctx, uint8_t cmd)
 {
+    ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
+    uint16_t data = CH375_CMD(cmd);  /* Bit 8 = 1 for command */
+    
+    /* Use Zephyr's native 9-bit UART function */
+    uart_poll_out_u16(hw->uart_dev, data);
+    
+    LOG_DBG("%s: CMD 0x%04X", hw->name, data);
+    return CH375_SUCCESS;
+}
+
+/* CH375 write data callback - uses native 9-bit UART */
+static int ch375_write_data_cb(struct ch375_context *ctx, uint8_t data)
+{
+    ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
+    uint16_t val = CH375_DATA(data);  /* Bit 8 = 0 for data */
+    
+    /* Use Zephyr's native 9-bit UART function */
+    uart_poll_out_u16(hw->uart_dev, val);
+    
+    LOG_DBG("%s: DATA 0x%04X", hw->name, val);
+    return CH375_SUCCESS;
+}
+
+/* CH375 read data callback - uses native 9-bit UART */
+static int ch375_read_data_cb(struct ch375_context *ctx, uint8_t *data)
+{
+    ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
+    uint16_t val;
     int ret;
-    uint8_t data_low = out_data & 0xFF;
-    uint8_t data_high = (out_data >> 8) & 0x01;  /* 9th bit */
     
-    /* For STM32, we need to handle 9-bit mode specially */
-    /* The 9th bit is typically in the TDR register's bit 8 */
+    /* Use Zephyr's native 9-bit UART function with timeout */
+    int64_t start = k_uptime_get();
+    int64_t timeout_ms = 500;
     
-    /* First, send the data with 9th bit information */
-    /* This requires low-level register access for STM32 */
-    
-#ifdef CONFIG_SOC_FAMILY_STM32
-    /* STM32-specific 9-bit handling */
-    USART_TypeDef *uart_instance = (USART_TypeDef *)DEVICE_MMIO_GET(dev);
-    
-    /* Wait for TX empty */
-    while (!(uart_instance->SR & USART_SR_TXE)) {
+    while (1) {
+        ret = uart_poll_in_u16(hw->uart_dev, &val);
+        if (ret == 0) {
+            /* Extract 8-bit data (ignore 9th bit on read) */
+            *data = (uint8_t)(val & 0xFF);
+            LOG_DBG("%s: READ 0x%04X -> 0x%02X", hw->name, val, *data);
+            return CH375_SUCCESS;
+        }
+        
+        /* Check timeout */
+        if (k_uptime_get() - start >= timeout_ms) {
+            LOG_ERR("%s: Read timeout", hw->name);
+            return CH375_ERROR;
+        }
+        
         k_yield();
     }
-    
-    /* Write 9-bit data to TDR */
-    uart_instance->DR = out_data & 0x1FF;  /* 9 bits */
-#else
-    /* Generic fallback - send as two bytes */
-    ret = uart_poll_out(dev, data_low);
-    if (ret != 0) {
-        return ret;
-    }
-    
-    /* Send high bit as separate byte (not ideal but works) */
-    if (data_high) {
-        ret = uart_poll_out(dev, 0x01);
-    }
-#endif
-    
-    return 0;
 }
 
-int uart_poll_in_u16(const struct device *dev, uint16_t *in_data)
+/* CH375 query interrupt callback */
+int ch375_query_int_cb(struct ch375_context *ctx)
 {
-    int ret;
-    uint16_t data = 0;
+    ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
     
-#ifdef CONFIG_SOC_FAMILY_STM32
-    /* STM32-specific 9-bit handling */
-    USART_TypeDef *uart_instance = (USART_TypeDef *)DEVICE_MMIO_GET(dev);
-    
-    /* Check if data is available */
-    if (!(uart_instance->SR & USART_SR_RXNE)) {
-        return -1;  /* No data available */
-    }
-    
-    /* Read 9-bit data from RDR */
-    data = uart_instance->DR & 0x1FF;  /* 9 bits */
-    *in_data = data;
-#else
-    /* Generic fallback */
-    uint8_t byte;
-    ret = uart_poll_in(dev, &byte);
-    if (ret != 0) {
-        return ret;
-    }
-    *in_data = byte;
-#endif
-    
-    return 0;
-}
-
-/* Asynchronous UART operations for better performance */
-struct ch375_uart_data {
-    uart_callback_t callback;
-    void *user_data;
-    struct k_sem tx_sem;
-    struct k_sem rx_sem;
-    uint16_t rx_buffer[64];
-    uint16_t tx_buffer[64];
-    size_t rx_len;
-    size_t tx_len;
-};
-
-static void uart_cb(const struct device *dev, struct uart_event *evt, void *user_data)
-{
-    struct ch375_uart_data *data = user_data;
-    
-    switch (evt->type) {
-    case UART_TX_DONE:
-        k_sem_give(&data->tx_sem);
-        break;
-        
-    case UART_RX_RDY:
-        data->rx_len = evt->data.rx.len;
-        k_sem_give(&data->rx_sem);
-        break;
-        
-    case UART_RX_DISABLED:
-        LOG_DBG("RX disabled");
-        break;
-        
-    default:
-        break;
-    }
-}
-
-int ch375_uart_init_async(const struct device *dev, struct ch375_uart_data *data)
-{
-    int ret;
-    
-    k_sem_init(&data->tx_sem, 0, 1);
-    k_sem_init(&data->rx_sem, 0, 1);
-    
-    ret = uart_callback_set(dev, uart_cb, data);
-    if (ret) {
-        LOG_ERR("Failed to set UART callback: %d", ret);
-        return ret;
-    }
-    
-    /* Start RX */
-    ret = uart_rx_enable(dev, (uint8_t *)data->rx_buffer, 
-                        sizeof(data->rx_buffer), SYS_FOREVER_MS);
-    if (ret) {
-        LOG_ERR("Failed to enable RX: %d", ret);
-        return ret;
-    }
-    
-    return 0;
-}
-
-int ch375_uart_send_async(const struct device *dev, struct ch375_uart_data *data,
-                          const uint16_t *buf, size_t len)
-{
-    int ret;
-    
-    if (len > ARRAY_SIZE(data->tx_buffer)) {
-        return -EINVAL;
-    }
-    
-    memcpy(data->tx_buffer, buf, len * sizeof(uint16_t));
-    data->tx_len = len;
-    
-    ret = uart_tx(dev, (uint8_t *)data->tx_buffer, 
-                 len * sizeof(uint16_t), SYS_FOREVER_MS);
-    if (ret) {
-        LOG_ERR("Failed to start TX: %d", ret);
-        return ret;
-    }
-    
-    /* Wait for TX complete */
-    ret = k_sem_take(&data->tx_sem, K_MSEC(500));
-    if (ret) {
-        LOG_ERR("TX timeout");
-        return ret;
-    }
-    
-    return 0;
-}
-
-int ch375_uart_recv_async(const struct device *dev, struct ch375_uart_data *data,
-                         uint16_t *buf, size_t *len, k_timeout_t timeout)
-{
-    int ret;
-    
-    /* Wait for RX data */
-    ret = k_sem_take(&data->rx_sem, timeout);
-    if (ret) {
-        return ret;  /* Timeout */
-    }
-    
-    if (data->rx_len > 0) {
-        size_t copy_len = MIN(data->rx_len, *len);
-        memcpy(buf, data->rx_buffer, copy_len * sizeof(uint16_t));
-        *len = copy_len;
-        
-        /* Restart RX */
-        uart_rx_enable(dev, (uint8_t *)data->rx_buffer,
-                      sizeof(data->rx_buffer), SYS_FOREVER_MS);
-        
+    if (!device_is_ready(hw->int_gpio.port)) {
         return 0;
     }
     
-    return -ENODATA;
+    /* INT pin is active low */
+    return gpio_pin_get_dt(&hw->int_gpio) == 0 ? 1 : 0;
+}
+
+/* Initialize CH375 hardware context and callbacks */
+int ch375_hw_init(const char *name,
+                  const struct device *uart_dev,
+                  struct gpio_dt_spec int_gpio,
+                  uint32_t initial_baudrate,
+                  struct ch375_context **ctx_out)
+{
+    ch375_hw_context_t *hw;
+    struct ch375_context *ctx;
+    int ret;
+    
+    /* Allocate hardware context */
+    hw = k_malloc(sizeof(ch375_hw_context_t));
+    if (!hw) {
+        LOG_ERR("Failed to allocate HW context");
+        return -ENOMEM;
+    }
+    
+    hw->name = name;
+    hw->uart_dev = uart_dev;
+    hw->int_gpio = int_gpio;
+    
+    /* Check UART device */
+    if (!device_is_ready(uart_dev)) {
+        LOG_ERR("%s: UART device not ready", name);
+        k_free(hw);
+        return -ENODEV;
+    }
+    
+    /* Configure UART for 9-bit mode */
+    ret = ch375_uart_configure_9bit(uart_dev, initial_baudrate);
+    if (ret < 0) {
+        LOG_ERR("%s: Failed to configure UART: %d", name, ret);
+        k_free(hw);
+        return ret;
+    }
+    
+    /* Configure INT GPIO */
+    if (!device_is_ready(int_gpio.port)) {
+        LOG_ERR("%s: INT GPIO not ready", name);
+        k_free(hw);
+        return -ENODEV;
+    }
+    
+    ret = gpio_pin_configure_dt(&int_gpio, GPIO_INPUT);
+    if (ret < 0) {
+        LOG_ERR("%s: Failed to configure INT GPIO: %d", name, ret);
+        k_free(hw);
+        return ret;
+    }
+    
+    /* Open CH375 context with callbacks */
+    ret = ch375_open_context(&ctx,
+                            ch375_write_cmd_cb,
+                            ch375_write_data_cb,
+                            ch375_read_data_cb,
+                            ch375_query_int_cb,
+                            hw);
+    if (ret != CH375_SUCCESS) {
+        LOG_ERR("%s: Failed to open CH375 context: %d", name, ret);
+        k_free(hw);
+        return -EIO;
+    }
+    
+    *ctx_out = ctx;
+    LOG_INF("%s: Hardware initialized successfully", name);
+    return 0;
+}
+
+/* Change baudrate at runtime */
+int ch375_hw_set_baudrate(struct ch375_context *ctx, uint32_t baudrate)
+{
+    ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
+    
+    return ch375_uart_configure_9bit(hw->uart_dev, baudrate);
 }

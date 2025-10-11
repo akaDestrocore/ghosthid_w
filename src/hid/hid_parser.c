@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "hid/hid_parser.h"
+#include "hid/hid_mouse.h"
 
 LOG_MODULE_REGISTER(hid_parser, LOG_LEVEL_DBG);
 

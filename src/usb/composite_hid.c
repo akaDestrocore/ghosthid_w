@@ -50,7 +50,7 @@ static int build_config_descriptor(void)
     /* Configuration descriptor */
     struct usb_cfg_descriptor *cfg = (struct usb_cfg_descriptor *)ptr;
     cfg->bLength = sizeof(struct usb_cfg_descriptor);
-    cfg->bDescriptorType = USB_DESC_CONFIGURATION;
+    cfg->bDescriptorType = USB_DT_CONFIGURATION;
     cfg->wTotalLength = 0;  /* Will be updated later */
     cfg->bNumInterfaces = interface_count;
     cfg->bConfigurationValue = 1;

@@ -166,19 +166,19 @@ int usbhid_fetch_report(struct usbhid_device *dev)
 static int get_hid_descriptor(struct usb_device *udev, uint8_t interface_num, 
                              struct usb_hid_descriptor **hid_desc)
 {
-    struct usb_descriptor *desc = (struct usb_descriptor *)udev->raw_conf_desc;
+    struct usb_desc_header *desc = (struct usb_desc_header *)udev->raw_conf_desc;
     void *raw_conf_desc_end = (uint8_t *)udev->raw_conf_desc + udev->raw_conf_desc_len;
     uint8_t current_interface_num = 0;
     
     while ((void *)desc < raw_conf_desc_end) {
-        desc = (struct usb_descriptor *)((uint8_t *)desc + desc->bLength);
+        desc = (struct usb_desc_header *)((uint8_t *)desc + desc->bLength);
         
         switch (desc->bDescriptorType) {
-        case USB_DT_INTERFACE:
-            current_interface_num = ((struct usb_interface_descriptor *)desc)->bInterfaceNumber;
+        case USB_DESC_INTERFACE:
+            current_interface_num = ((struct usb_if_descriptor *)desc)->bInterfaceNumber;
             break;
             
-        case USB_DT_HID:
+        case USB_DESC_HID :
             if (current_interface_num == interface_num) {
                 *hid_desc = (struct usb_hid_descriptor *)desc;
                 return 0;
@@ -203,8 +203,8 @@ static int hid_get_class_descriptor(struct usb_device *udev, uint8_t interface_n
     
     do {
         ret = ch375_host_control_transfer(udev,
-            USB_ENDPOINT_IN | USB_REQUEST_TYPE_STANDARD | USB_RECIPIENT_INTERFACE,
-            USB_REQUEST_GET_DESCRIPTOR,
+            0x80 | 0x00 | 0x01,
+            USB_SREQ_GET_DESCRIPTOR,
             type << 8,
             interface_num,
             buf, len, &actual_len, TRANSFER_TIMEOUT);
@@ -248,7 +248,7 @@ static void set_idle(struct usb_device *udev, uint8_t interface_num,
     int ret;
     
     ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_OUT | USB_REQUEST_TYPE_CLASS | USB_RECIPIENT_INTERFACE,
+        0x00 | 0x20 | 0x01,
         HID_SET_IDLE,
         (duration << 8) | report_id,
         interface_num,
@@ -270,7 +270,7 @@ static int set_report(struct usb_device *udev, uint8_t interface_num,
     
     do {
         ret = ch375_host_control_transfer(udev,
-            USB_ENDPOINT_OUT | USB_REQUEST_TYPE_CLASS | USB_RECIPIENT_INTERFACE,
+            0x00 | 0x20 | 0x01,
             HID_SET_REPORT,
             (report_type << 8) | report_id,
             interface_num,
@@ -333,7 +333,7 @@ int usbhid_open(struct usb_device *udev, uint8_t interface_num,
     }
     
     /* Get HID report descriptor */
-    ret = hid_get_class_descriptor(udev, interface_num, USB_DT_REPORT,
+    ret = hid_get_class_descriptor(udev, interface_num, 0x22,
                                  raw_hid_report_desc, raw_hid_report_desc_len);
     if (ret != USBHID_SUCCESS) {
         LOG_ERR("Get HID report descriptor failed: %d", ret);

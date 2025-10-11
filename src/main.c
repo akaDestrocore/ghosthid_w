@@ -104,7 +104,7 @@ static int uart_init_9bit(const struct device *uart_dev, uint32_t baudrate)
 }
 
 /* CH375 callback functions using native Zephyr UART API */
-static int ch375_write_cmd(struct ch375_context *ctx, uint8_t cmd)
+int ch375_write_cmd(struct ch375_context *ctx, uint8_t cmd)
 {
     device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
     uint16_t data = CH375_CMD(cmd);  /* Set bit 8 for command */
@@ -116,7 +116,7 @@ static int ch375_write_cmd(struct ch375_context *ctx, uint8_t cmd)
     return CH375_SUCCESS;
 }
 
-static int ch375_write_data(struct ch375_context *ctx, uint8_t data)
+int ch375_write_data(struct ch375_context *ctx, uint8_t data)
 {
     device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
     uint16_t value = CH375_DATA(data);  /* Clear bit 8 for data */
@@ -126,7 +126,7 @@ static int ch375_write_data(struct ch375_context *ctx, uint8_t data)
     return CH375_SUCCESS;
 }
 
-static int ch375_read_data(struct ch375_context *ctx, uint8_t *data)
+int ch375_read_data(struct ch375_context *ctx, uint8_t *data)
 {
     device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
     uint16_t value;
@@ -141,7 +141,7 @@ static int ch375_read_data(struct ch375_context *ctx, uint8_t *data)
     return CH375_ERROR;
 }
 
-static int ch375_query_int(struct ch375_context *ctx)
+int ch375_query_int(struct ch375_context *ctx)
 {
     device_input_t *devin = (device_input_t *)ch375_get_priv(ctx);
     int val = gpio_pin_get(devin->gpio_dev, devin->int_pin);

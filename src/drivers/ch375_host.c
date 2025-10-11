@@ -5,14 +5,16 @@
 #include <string.h>
 #include <stdlib.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/usb/usb_ch9.h>
 
 #include "ch375/ch375.h"
 #include "ch375/ch375_host.h"
+#include "ch375/usb.h"
 
 LOG_MODULE_REGISTER(ch375_host, LOG_LEVEL_DBG);
 
-#define SETUP_IN(x) ((x) & 0x80)
-#define EP_IN(x) ((x) & 0x80)
+#define SETUP_IN(x) ((x) & USB_ENDPOINT_IN)
+#define EP_IN(x) ((x) & USB_ENDPOINT_IN)
 
 #define RESET_WAIT_DEVICE_RECONNECT_TIMEOUT_MS 1000
 #define TRANSFER_TIMEOUT 5000
@@ -20,17 +22,17 @@ LOG_MODULE_REGISTER(ch375_host, LOG_LEVEL_DBG);
 #define USB_DEFAULT_ADDRESS 1
 #define USB_DEFAULT_EP0_MAX_PACKSIZE 8
 
-/* Fill control setup packet */
+/* Fill control setup packet using Zephyr's structure */
 static inline void fill_control_setup(uint8_t *buf,
     uint8_t request_type, uint8_t bRequest, uint16_t wValue, 
     uint16_t wIndex, uint16_t wLength)
 {
-    struct usb_control_setup *cs = (struct usb_control_setup *)buf;
-    cs->bmRequestType = request_type;
-    cs->bRequest = bRequest;
-    cs->wValue = sys_cpu_to_le16(wValue);
-    cs->wIndex = sys_cpu_to_le16(wIndex);
-    cs->wLength = sys_cpu_to_le16(wLength);
+    struct usb_setup_packet *setup = (struct usb_setup_packet *)buf;
+    setup->bmRequestType = request_type;
+    setup->bRequest = bRequest;
+    setup->wValue = sys_cpu_to_le16(wValue);
+    setup->wIndex = sys_cpu_to_le16(wIndex);
+    setup->wLength = sys_cpu_to_le16(wLength);
 }
 
 /* Host control transfer */
@@ -332,9 +334,9 @@ int ch375_host_interrupt_transfer(struct usb_device *udev,
     return ch375_host_bulk_transfer(udev, ep, data, length, actual_length, timeout);
 }
 
-/* Parse endpoint descriptor */
+/* Parse endpoint descriptor - use Zephyr types */
 static void parse_endpoint_descriptor(struct usb_interface *interface,
-                                     struct usb_endpoint_descriptor *desc)
+                                     struct usb_ep_descriptor *desc)
 {
     struct usb_endpoint *ep = &interface->endpoint[interface->endpoint_cnt];
     
@@ -347,9 +349,9 @@ static void parse_endpoint_descriptor(struct usb_interface *interface,
     interface->endpoint_cnt++;
 }
 
-/* Parse interface descriptor */
+/* Parse interface descriptor - use Zephyr types */
 static void parse_interface_descriptor(struct usb_device *udev,
-                                      struct usb_interface_descriptor *desc)
+                                      struct usb_if_descriptor *desc)
 {
     struct usb_interface *interface = &udev->interface[udev->interface_cnt];
     
@@ -361,28 +363,28 @@ static void parse_interface_descriptor(struct usb_device *udev,
     udev->interface_cnt++;
 }
 
-/* Parse configuration descriptor */
+/* Parse configuration descriptor - use Zephyr types */
 static int parse_config_descriptor(struct usb_device *udev)
 {
-    struct usb_descriptor *desc = (struct usb_descriptor *)udev->raw_conf_desc;
+    struct usb_desc_header *desc = (struct usb_desc_header *)udev->raw_conf_desc;
     void *raw_conf_desc_end = (uint8_t *)udev->raw_conf_desc + udev->raw_conf_desc_len;
     
     while ((void *)desc < raw_conf_desc_end) {
         /* Skip to next descriptor */
-        desc = (struct usb_descriptor *)((uint8_t *)desc + desc->bLength);
+        desc = (struct usb_desc_header *)((uint8_t *)desc + desc->bLength);
         
         switch (desc->bDescriptorType) {
-        case USB_DT_INTERFACE:
-            parse_interface_descriptor(udev, (struct usb_interface_descriptor *)desc);
+        case USB_DESC_INTERFACE:
+            parse_interface_descriptor(udev, (struct usb_if_descriptor *)desc);
             break;
             
-        case USB_DT_ENDPOINT:
+        case USB_DESC_ENDPOINT:
             if (udev->interface_cnt == 0) {
                 LOG_ERR("Endpoint descriptor before interface descriptor");
                 return CH375_HOST_ERROR;
             }
             parse_endpoint_descriptor(&udev->interface[udev->interface_cnt - 1],
-                                    (struct usb_endpoint_descriptor *)desc);
+                                    (struct usb_ep_descriptor *)desc);
             break;
             
         default:
@@ -394,15 +396,15 @@ static int parse_config_descriptor(struct usb_device *udev)
     return CH375_HOST_SUCCESS;
 }
 
-/* Get configuration descriptor */
+/* Get configuration descriptor - use Zephyr constants */
 static int get_config_descriptor(struct usb_device *udev, uint8_t *buf, uint16_t len)
 {
     int actual_len = 0;
     int ret;
     
     ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_IN | USB_REQUEST_TYPE_STANDARD | USB_RECIPIENT_DEVICE,
-        USB_REQUEST_GET_DESCRIPTOR,
+        USB_ENDPOINT_IN | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
+        USB_SREQ_GET_DESCRIPTOR,
         USB_DT_CONFIG << 8, 0,
         buf, len, &actual_len, TRANSFER_TIMEOUT);
         
@@ -419,7 +421,7 @@ static int get_config_descriptor(struct usb_device *udev, uint8_t *buf, uint16_t
     return CH375_HOST_SUCCESS;
 }
 
-/* Get device descriptor */
+/* Get device descriptor - use Zephyr types */
 static int get_device_descriptor(struct usb_device *udev, uint8_t *buf)
 {
     int actual_len = 0;
@@ -427,9 +429,9 @@ static int get_device_descriptor(struct usb_device *udev, uint8_t *buf)
     struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)buf;
     
     ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_IN | USB_REQUEST_TYPE_STANDARD | USB_RECIPIENT_DEVICE,
-        USB_REQUEST_GET_DESCRIPTOR,
-        USB_DT_DEVICE << 8, 0,
+        USB_ENDPOINT_IN | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
+        USB_SREQ_GET_DESCRIPTOR,
+        USB_DESC_DEVICE << 8, 0,
         buf, sizeof(struct usb_device_descriptor), &actual_len, TRANSFER_TIMEOUT);
         
     if (ret != CH375_HOST_SUCCESS) {
@@ -442,7 +444,7 @@ static int get_device_descriptor(struct usb_device *udev, uint8_t *buf)
         return CH375_HOST_ERROR;
     }
     
-    if (dev_desc->bDescriptorType != USB_DT_DEVICE) {
+    if (dev_desc->bDescriptorType != USB_DESC_DEVICE) {
         LOG_ERR("Invalid device descriptor type: 0x%02X", dev_desc->bDescriptorType);
         return CH375_HOST_ERROR;
     }
@@ -457,8 +459,8 @@ static int ch375_set_dev_address(struct usb_device *udev, uint8_t addr)
     
     /* Send SET_ADDRESS to device */
     ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_OUT | USB_REQUEST_TYPE_STANDARD | USB_RECIPIENT_DEVICE,
-        USB_REQUEST_SET_ADDRESS,
+        USB_ENDPOINT_OUT | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
+        USB_SREQ_SET_ADDRESS,
         addr, 0, NULL, 0, NULL, TRANSFER_TIMEOUT);
         
     if (ret != CH375_HOST_SUCCESS) {
@@ -491,8 +493,8 @@ int ch375_host_clear_stall(struct usb_device *udev, uint8_t ep)
     }
     
     ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_IN | USB_REQUEST_TYPE_STANDARD | USB_RECIPIENT_ENDPOINT,
-        USB_REQUEST_CLEAR_FEATURE,
+        USB_ENDPOINT_IN | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_RECIPIENT_ENDPOINT,
+        USB_SREQ_CLEAR_FEATURE,
         0, ep, NULL, 0, NULL, TRANSFER_TIMEOUT);
         
     if (ret != CH375_HOST_SUCCESS) {
@@ -511,8 +513,8 @@ int ch375_host_clear_stall(struct usb_device *udev, uint8_t ep)
 int ch375_host_set_configuration(struct usb_device *udev, uint8_t configuration)
 {
     int ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_OUT | USB_REQUEST_TYPE_STANDARD | USB_RECIPIENT_DEVICE,
-        USB_REQUEST_SET_CONFIGURATION,
+        USB_ENDPOINT_OUT | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
+        USB_SREQ_SET_CONFIGURATION,
         configuration, 0, NULL, 0, NULL, TRANSFER_TIMEOUT);
         
     if (ret != CH375_HOST_SUCCESS) {
@@ -651,10 +653,10 @@ void ch375_host_udev_close(struct usb_device *udev)
     memset(udev, 0, sizeof(struct usb_device));
 }
 
-/* Open USB device */
+/* Open USB device - use Zephyr types */
 int ch375_host_udev_open(struct ch375_context *ctx, struct usb_device *udev)
 {
-    struct usb_config_descriptor short_conf_desc = {0};
+    struct usb_cfg_descriptor short_conf_desc = {0};
     uint16_t conf_total_len = 0;
     int ret;
     int i;
