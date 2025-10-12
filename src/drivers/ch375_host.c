@@ -59,7 +59,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
     struct ch375_context *ctx;
     uint8_t setup_buf[CONTROL_SETUP_SIZE];
     int residue_len = wLength;
-    uint8_t tog;
+    uint8_t tog = 0;
     int offset = 0;
     uint8_t status;
     int ret;
@@ -83,8 +83,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
     }
     
     /* SETUP stage - always uses tog=0 */
-    LOG_DBG("Sending SETUP (reqtype=0x%02X, req=0x%02X, val=0x%04X, idx=0x%04X, len=%d)",
-           request_type, bRequest, wValue, wIndex, wLength);
+    LOG_DBG("Sending SETUP ...");
     fill_control_setup(setup_buf, request_type, bRequest, wValue, wIndex, wLength);
     
     ret = ch375_write_block_data(ctx, setup_buf, CONTROL_SETUP_SIZE);
@@ -93,7 +92,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
         return CH375_HOST_ERROR;
     }
     
-    ret = ch375_send_token(ctx, 0, 0, CH375_USB_PID_SETUP, &status);
+    ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_SETUP, &status);
     if (ret != CH375_SUCCESS) {
         LOG_ERR("Send SETUP token failed: %d", ret);
         return CH375_HOST_ERROR;
@@ -104,11 +103,10 @@ int ch375_host_control_transfer(struct usb_device *udev,
         goto status_error;
     }
     
+    tog = tog ^ 1;
     LOG_DBG("SETUP succeeded");
     
-    /* DATA stage - Start with tog=0, then toggle after EACH packet */
-    tog = 0;
-
+    /* DATA stage - tog is now 1 */
     while (residue_len) {
         uint8_t len = residue_len > udev->ep0_maxpack ? udev->ep0_maxpack : residue_len;
         uint8_t actual_len = 0;
@@ -136,16 +134,16 @@ int ch375_host_control_transfer(struct usb_device *udev,
             
             LOG_DBG("IN token succeeded, read %d bytes", actual_len);
             
-            /* Toggle AFTER success */
-            tog = tog ^ 1;
-            
             residue_len -= actual_len;
             offset += actual_len;
             
-            if (actual_len < udev->ep0_maxpack) {
-                LOG_DBG("Short packet detected, ending DATA stage");
-                break;
+            // Only toggle on short packet OR when all data received
+            if (actual_len < udev->ep0_maxpack || residue_len == 0) {
+                LOG_DBG("Short packet or end of data, will toggle for next stage");
+                tog = tog ^ 1;
+                break;  // Short packet ends the DATA stage
             }
+            // Don't toggle - keep same toggle for next packet
         } else {
             /* OUT transfer */
             ret = ch375_write_block_data(ctx, data + offset, len);
