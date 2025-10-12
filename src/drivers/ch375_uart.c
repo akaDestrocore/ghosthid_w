@@ -106,34 +106,47 @@ int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
     
     /* Read DR to clear RXNE if set */
     (void)uart_instance->DR;
+
+    k_msleep(5);
+    ch375_uart_flush_rx(dev);
     
     LOG_INF("UART configuration complete");
     
     return 0;
 }
 
-/* Flush UART RX buffer - discard any stale data */
+/* Flush RX buffer - CRITICAL for clean communication */
 void ch375_uart_flush_rx(const struct device *dev)
 {
     USART_TypeDef *uart_instance;
     uint16_t dummy;
-    int attempts = 0;
+    int timeout = 100;  /* Max bytes to flush */
     
     uart_instance = get_uart_instance(dev);
     if (!uart_instance) {
         return;
     }
     
-    /* Read and discard all pending data */
-    while (uart_instance->SR & USART_SR_RXNE) {
-        dummy = uart_instance->DR;  /* Reading DR clears RXNE */
-        attempts++;
-        if (attempts > 100) break;  /* Safety limit */
+    /* Read and discard all pending RX data */
+    while (timeout-- > 0) {
+        if (uart_instance->SR & USART_SR_RXNE) {
+            dummy = uart_instance->DR;  /* Read clears RXNE */
+            (void)dummy;
+        } else {
+            break;  /* No more data */
+        }
+        k_busy_wait(10);
     }
     
     /* Clear error flags */
     if (uart_instance->SR & USART_SR_ORE) {
         (void)uart_instance->SR;
+        (void)uart_instance->DR;
+    }
+    if (uart_instance->SR & USART_SR_FE) {
+        (void)uart_instance->DR;
+    }
+    if (uart_instance->SR & USART_SR_NE) {
         (void)uart_instance->DR;
     }
 }
@@ -180,6 +193,8 @@ int ch375_uart_write_u16_timeout(const struct device *dev, uint16_t data,
         k_busy_wait(10);
     }
     
+    k_busy_wait(50);
+    ch375_uart_flush_rx(dev);
     return 0;
 }
 
@@ -306,7 +321,9 @@ static int ch375_read_data_cb(struct ch375_context *ctx, uint8_t *data)
     ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
     uint16_t val;
     int ret;
-    
+
+     k_busy_wait(100);
+
     ret = ch375_uart_read_u16_timeout(hw->uart_dev, &val, K_MSEC(500));
     if (ret < 0) {
         LOG_ERR("%s: READ failed: %d", hw->name, ret);

@@ -178,15 +178,20 @@ int ch375_host_control_transfer(struct usb_device *udev,
     /* STATUS stage - always uses tog=1 (DATA1) */
     if (SETUP_IN(request_type)) {
         /* IN control: STATUS is OUT with no data */
-        LOG_DBG("Sending STATUS OUT");
+        LOG_DBG("Sending STATUS OUT (tog=%d)", 1);
         
-        ret = ch375_write_block_data(ctx, NULL, 0);
+        uint8_t dummy[1] = {0};
+        LOG_DBG("About to write block data with len=0");
+        ret = ch375_write_block_data(ctx, dummy, 0);
+        LOG_DBG("write_block_data returned: %d", ret);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Write status OUT failed: %d", ret);
             return CH375_HOST_ERROR;
         }
         
+        LOG_DBG("About to send OUT token with tog=1");
         ret = ch375_send_token(ctx, 0, 1, CH375_USB_PID_OUT, &status);
+        LOG_DBG("send_token returned: %d, status=0x%02X", ret, status);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Send status OUT token failed: %d", ret);
             return CH375_HOST_ERROR;
@@ -703,7 +708,7 @@ int ch375_host_udev_open(struct ch375_context *ctx, struct usb_device *udev)
     
     memset(udev, 0, sizeof(struct usb_device));
     udev->context = ctx;
-    udev->ep0_maxpack = USB_DEFAULT_EP0_MAX_PACKSIZE;
+    udev->ep0_maxpack = 8;  // Start with minimum 8 bytes
     
     ret = ch375_host_reset_dev(udev);
     if (ret != CH375_HOST_SUCCESS) {
@@ -711,14 +716,36 @@ int ch375_host_udev_open(struct ch375_context *ctx, struct usb_device *udev)
         return ret;
     }
     
-    LOG_INF("Getting device descriptor");
-    ret = get_device_descriptor(udev, (uint8_t *)&udev->raw_dev_desc);
+    LOG_INF("Getting device descriptor (first 8 bytes)");
+    // Get first 8 bytes to read bMaxPacketSize0
+    ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_IN, USB_TYPE_STANDARD, USB_RECIP_DEVICE),
+        USB_SREQ_GET_DESCRIPTOR,
+        USB_DESC_DEVICE << 8, 0,
+        (uint8_t *)&udev->raw_dev_desc, 8, NULL, TRANSFER_TIMEOUT);
+        
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Get device descriptor (8 bytes) failed: %d", ret);
+        goto failed;
+    }
+    
+    // Now we know the real max packet size
+    udev->ep0_maxpack = udev->raw_dev_desc.bMaxPacketSize0;
+    LOG_INF("EP0 max packet size = %d", udev->ep0_maxpack);
+    
+    // Get full device descriptor with correct packet size
+    LOG_INF("Getting full device descriptor");
+    ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_IN, USB_TYPE_STANDARD, USB_RECIP_DEVICE),
+        USB_SREQ_GET_DESCRIPTOR,
+        USB_DESC_DEVICE << 8, 0,
+        (uint8_t *)&udev->raw_dev_desc, sizeof(struct usb_device_descriptor), NULL, TRANSFER_TIMEOUT);
+        
     if (ret != CH375_HOST_SUCCESS) {
         LOG_ERR("Get device descriptor failed: %d", ret);
         goto failed;
     }
     
-    udev->ep0_maxpack = udev->raw_dev_desc.bMaxPacketSize0;
     udev->vid = sys_le16_to_cpu(udev->raw_dev_desc.idVendor);
     udev->pid = sys_le16_to_cpu(udev->raw_dev_desc.idProduct);
     

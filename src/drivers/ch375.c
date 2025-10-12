@@ -50,7 +50,12 @@ int ch375_write_block_data(struct ch375_context *ctx, uint8_t *buf, uint8_t len)
     int ret;
     uint8_t offset;
     
-    if (!ctx || !buf) {
+    if (!ctx) {
+        return CH375_PARAM_INVALID;
+    }
+    
+    /* Allow NULL buffer only if length is 0 (for STATUS stage) */
+    if (!buf && len != 0) {
         return CH375_PARAM_INVALID;
     }
     
@@ -550,7 +555,6 @@ int ch375_send_token(struct ch375_context *ctx, uint8_t ep, uint8_t tog,
     tog_val = tog ? 0xC0 : 0x00;
     ep_pid = (ep << 4) | pid;
     
-    ch375_uart_flush_rx();
     LOG_DBG("Send token: tog=0x%02X, ep_pid=0x%02X", tog_val, ep_pid);
     
     k_mutex_lock(&ctx->lock, K_FOREVER);
