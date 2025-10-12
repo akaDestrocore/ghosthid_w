@@ -44,14 +44,10 @@ static struct agp_context *s_agp_ctx;
 static uint8_t s_enable_gun_press;
 static uint8_t s_started_gun_press;
 
-/* Thread stacks */
-K_THREAD_STACK_DEFINE(hid_stack, 2048);
-struct k_work_q hid_work_q;
-
 /* Device initialization using device tree */
 static int init_device_input_dt(device_input_t *devin, 
-                                const char *uart_label,  /* Keep for logging */
-                                const struct device *uart_dev,  /* Pass device directly */
+                                const char *uart_label,
+                                const struct device *uart_dev,
                                 const struct gpio_dt_spec *int_gpio,
                                 const char *dev_name,
                                 uint8_t interface_num)
@@ -61,7 +57,7 @@ static int init_device_input_dt(device_input_t *devin,
     devin->name = dev_name;
     devin->interface_num = interface_num;
     devin->int_gpio = *int_gpio;
-    devin->uart_dev = uart_dev;  /* Use passed device */
+    devin->uart_dev = uart_dev;
     
     if (!device_is_ready(devin->uart_dev)) {
         LOG_ERR("UART device %s not ready", uart_label);
@@ -70,7 +66,7 @@ static int init_device_input_dt(device_input_t *devin,
     
     LOG_INF("Found UART device: %s", uart_label);
     
-    /* Rest remains the same */
+    /* Initialize CH375 hardware */
     ret = ch375_hw_init(devin->name,
                        devin->uart_dev,
                        devin->int_gpio,
@@ -215,136 +211,7 @@ static int handle_keyboard(struct hid_keyboard *keyboard, uint8_t interface_num)
     return 0;
 }
 
-/* HID processing work handler */
-static void hid_work_handler(struct k_work *work)
-{
-    ARG_UNUSED(work);
-    int ret;
-    
-    while (1) {
-        for (int i = 0; i < CH375_MODULE_NUM; i++) {
-            device_input_t *devin = &s_arr_devin[i];
-            
-            if (!devin->is_connected) {
-                continue;
-            }
-            
-            if (devin->hiddev.hid_type == USBHID_TYPE_MOUSE) {
-                ret = handle_mouse(&devin->mouse, devin->interface_num);
-            } else if (devin->hiddev.hid_type == USBHID_TYPE_KEYBOARD) {
-                ret = handle_keyboard(&devin->keyboard, devin->interface_num);
-            }
-            
-            if (ret == USBHID_NO_DEV) {
-                LOG_ERR("%s: Device disconnected", devin->name);
-                devin->is_connected = 0;
-            }
-        }
-        
-        k_msleep(1);  /* 1ms polling interval */
-    }
-}
-
-K_WORK_DEFINE(hid_work, hid_work_handler);
-
-/* Wait for device connection and enumerate */
-static int wait_and_enumerate_device(device_input_t *devin)
-{
-    int ret;
-    
-    LOG_INF("%s: Waiting for device connection...", devin->name);
-    
-    ret = ch375_host_wait_device_connect(devin->ch375_ctx, 10000);
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("%s: Device connection timeout", devin->name);
-        return -ETIMEDOUT;
-    }
-    
-    LOG_INF("%s: Device connected, enumerating...", devin->name);
-    
-    /* Open USB device */
-    ret = ch375_host_udev_open(devin->ch375_ctx, &devin->usbdev);
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("%s: Failed to open USB device: %d", devin->name, ret);
-        return -EIO;
-    }
-    
-    LOG_INF("%s: USB device opened (VID:%04X PID:%04X)",
-           devin->name, devin->usbdev.vid, devin->usbdev.pid);
-    
-    /* Open HID device */
-    ret = usbhid_open(&devin->usbdev, 0, &devin->hiddev);
-    if (ret != USBHID_SUCCESS) {
-        LOG_ERR("%s: Failed to open HID device: %d", devin->name, ret);
-        return -EIO;
-    }
-    
-    LOG_INF("%s: HID device opened (type: %s)",
-           devin->name,
-           devin->hiddev.hid_type == USBHID_TYPE_MOUSE ? "Mouse" : "Keyboard");
-    
-    /* Initialize HID class driver */
-    if (devin->hiddev.hid_type == USBHID_TYPE_MOUSE) {
-        ret = hid_mouse_open(&devin->hiddev, &devin->mouse);
-    } else {
-        ret = hid_keyboard_open(&devin->hiddev, &devin->keyboard);
-    }
-    
-    if (ret != USBHID_SUCCESS) {
-        LOG_ERR("%s: Failed to open HID class device: %d", devin->name, ret);
-        return -EIO;
-    }
-    
-    devin->is_connected = 1;
-    return 0;
-}
-
-/* USB device initialization */
-static int init_usb_device(void)
-{
-    int ret;
-    
-    /* Register composite HID interfaces */
-    for (int i = 0; i < CH375_MODULE_NUM; i++) {
-        device_input_t *devin = &s_arr_devin[i];
-        
-        if (!devin->is_connected) {
-            continue;
-        }
-        
-        /* Register HID interface */
-        ret = composite_hid_register_interface(
-            i,
-            devin->hiddev.raw_hid_report_desc,
-            devin->hiddev.raw_hid_report_desc_len,
-            8,  /* max packet size */
-            1   /* interval */
-        );
-        
-        if (ret) {
-            LOG_ERR("Failed to register HID interface %d", i);
-            return ret;
-        }
-    }
-    
-    /* Initialize composite HID */
-    ret = composite_hid_init();
-    if (ret) {
-        LOG_ERR("Failed to initialize composite HID");
-        return ret;
-    }
-    
-    /* Enable USB device */
-    ret = usb_enable(NULL);
-    if (ret) {
-        LOG_ERR("Failed to enable USB device");
-        return ret;
-    }
-    
-    LOG_INF("USB device initialized");
-    return 0;
-}
-
+/* Open device input (USB HID host side) */
 static int open_device_in(device_input_t *devin)
 {
     struct usb_device *udev = &devin->usbdev;
@@ -667,22 +534,6 @@ int main(void)
         close_all_devices();
         
         k_msleep(1000);
-    }
-    
-    return 0;
-}
-
-ret = init_device_input_dt(&s_arr_devin[1], "USART3", uart3, &ch375b_int, "CH375B", 1);
-if (ret) {
-    LOG_ERR("Failed to initialize CH375B");
-    return ret;
-}
-
-    
-    /* Simple loop */
-    while (1) {
-        LOG_INF("Heartbeat...");
-        k_msleep(2000);
     }
     
     return 0;
