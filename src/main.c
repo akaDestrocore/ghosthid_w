@@ -401,17 +401,17 @@ int main(void)
     LOG_INF("=================================");
 
     /* Initialize device inputs */
-    ret = init_device_input_dt(&s_arr_devin[0], "USART2", uart2, &ch375a_int, "CH375A", 0);
-    if (ret) {
-        LOG_ERR("Failed to initialize CH375A");
-        return ret;
-    }
+ret = init_device_input_dt(&s_arr_devin[0], "USART2", uart2, &ch375a_int, "CH375A", 0);
+if (ret) {
+    LOG_ERR("Failed to initialize CH375A");
+    return ret;
+}
 
-    ret = init_device_input_dt(&s_arr_devin[1], "USART3", uart3, &ch375b_int, "CH375B", 1);
-    if (ret) {
-        LOG_ERR("Failed to initialize CH375B");
-        return ret;
-    }
+ret = init_device_input_dt(&s_arr_devin[1], "USART3", uart3, &ch375b_int, "CH375B", 1);
+if (ret) {
+    LOG_ERR("Failed to initialize CH375B");
+    return ret;
+}
 
     
     /* Simple loop */
