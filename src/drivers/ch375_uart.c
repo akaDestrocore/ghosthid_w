@@ -20,8 +20,12 @@ LOG_MODULE_REGISTER(ch375_uart, LOG_LEVEL_DBG);
 typedef struct {
     const char *name;
     const struct device *uart_dev;
+    USART_TypeDef *uart_instance;  // Store instance pointer
     struct gpio_dt_spec int_gpio;
 } ch375_hw_context_t;
+
+/* Forward declaration */
+static USART_TypeDef *get_uart_instance(const struct device *dev);
 
 /* Configure UART for 9-bit mode using LL drivers */
 int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
@@ -34,16 +38,9 @@ int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
     }
     
     /* Get USART instance from device */
-    const char *dev_name = dev->name;
-    
-    if (strcmp(dev_name, "USART_2") == 0) {
-        uart_instance = USART2;
-    } else if (strcmp(dev_name, "USART_3") == 0) {
-        uart_instance = USART3;
-    } else if (strcmp(dev_name, "UART_4") == 0) {
-        uart_instance = UART4;
-    } else {
-        LOG_ERR("Unknown UART device: %s", dev_name);
+    uart_instance = get_uart_instance(dev);
+    if (!uart_instance) {
+        LOG_ERR("Unknown UART device: %s", dev->name);
         return -ENOTSUP;
     }
     
@@ -71,7 +68,7 @@ int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
     /* Wait for UART to be ready */
     k_busy_wait(100);
     
-    LOG_INF("Configured %s for 9-bit mode at %d baud", dev_name, baudrate);
+    LOG_INF("Configured UART for 9-bit mode at %d baud", baudrate);
     return 0;
 }
 
@@ -92,14 +89,8 @@ int ch375_uart_write_u16_timeout(const struct device *dev, uint16_t data,
     }
     
     /* Get USART instance */
-    const char *dev_name = dev->name;
-    if (strcmp(dev_name, "USART_2") == 0) {
-        uart_instance = USART2;
-    } else if (strcmp(dev_name, "USART_3") == 0) {
-        uart_instance = USART3;
-    } else if (strcmp(dev_name, "UART_4") == 0) {
-        uart_instance = UART4;
-    } else {
+    uart_instance = get_uart_instance(dev);
+    if (!uart_instance) {
         return -ENOTSUP;
     }
     
@@ -146,14 +137,8 @@ int ch375_uart_read_u16_timeout(const struct device *dev, uint16_t *data,
     }
     
     /* Get USART instance */
-    const char *dev_name = dev->name;
-    if (strcmp(dev_name, "USART_2") == 0) {
-        uart_instance = USART2;
-    } else if (strcmp(dev_name, "USART_3") == 0) {
-        uart_instance = USART3;
-    } else if (strcmp(dev_name, "UART_4") == 0) {
-        uart_instance = UART4;
-    } else {
+    uart_instance = get_uart_instance(dev);
+    if (!uart_instance) {
         return -ENOTSUP;
     }
     
@@ -171,8 +156,23 @@ int ch375_uart_read_u16_timeout(const struct device *dev, uint16_t *data,
     return 0;
 }
 
+/* Get USART instance from device - use DT macros */
+static USART_TypeDef *get_uart_instance(const struct device *dev)
+{
+    /* Check against known UART device tree nodes */
+    if (dev == DEVICE_DT_GET(DT_NODELABEL(usart2))) {
+        return USART2;
+    } else if (dev == DEVICE_DT_GET(DT_NODELABEL(usart3))) {
+        return USART3;
+    } else if (dev == DEVICE_DT_GET(DT_NODELABEL(uart4))) {
+        return UART4;
+    }
+    
+    return NULL;
+}
+
 /* ============================================================
- * CH375 CALLBACK IMPLEMENTATION - ADD BELOW HERE
+ * CH375 CALLBACK IMPLEMENTATION
  * ============================================================ */
 
 /* Write command callback - uses 9-bit UART */
@@ -251,7 +251,15 @@ int ch375_hw_init(const char *name,
 {
     ch375_hw_context_t *hw;
     struct ch375_context *ctx;
+    USART_TypeDef *uart_instance;
     int ret;
+    
+    /* Determine UART instance */
+    uart_instance = get_uart_instance(uart_dev);
+    if (!uart_instance) {
+        LOG_ERR("%s: Unknown UART device", name);
+        return -ENOTSUP;
+    }
     
     /* Allocate hardware context */
     hw = k_malloc(sizeof(ch375_hw_context_t));
@@ -262,6 +270,7 @@ int ch375_hw_init(const char *name,
     
     hw->name = name;
     hw->uart_dev = uart_dev;
+    hw->uart_instance = uart_instance;
     hw->int_gpio = int_gpio;
     
     /* Check UART device */
@@ -271,7 +280,7 @@ int ch375_hw_init(const char *name,
         return -ENODEV;
     }
     
-    /* Configure UART for 9-bit mode - THIS IS THE CRITICAL FIX */
+    /* Configure UART for 9-bit mode */
     ret = ch375_uart_configure_9bit(uart_dev, initial_baudrate);
     if (ret < 0) {
         LOG_ERR("%s: Failed to configure 9-bit UART: %d", name, ret);
