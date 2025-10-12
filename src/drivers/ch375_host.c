@@ -106,7 +106,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
     tog = tog ^ 1;
     LOG_DBG("SETUP succeeded");
     
-    /* DATA stage - tog is now 1 */
+    //* DATA stage - tog starts at 1 (DATA1) */
     while (residue_len) {
         uint8_t len = residue_len > udev->ep0_maxpack ? udev->ep0_maxpack : residue_len;
         uint8_t actual_len = 0;
@@ -137,13 +137,17 @@ int ch375_host_control_transfer(struct usb_device *udev,
             residue_len -= actual_len;
             offset += actual_len;
             
-            // Only toggle on short packet OR when all data received
-            if (actual_len < udev->ep0_maxpack || residue_len == 0) {
-                LOG_DBG("Short packet or end of data, will toggle for next stage");
-                tog = tog ^ 1;
-                break;  // Short packet ends the DATA stage
+            /* Toggle for next packet */
+            tog = tog ^ 1;
+            
+            /* Short packet ends the DATA stage */
+            if (actual_len < udev->ep0_maxpack) {
+                LOG_DBG("Short packet received, DATA stage complete");
+                break;
             }
-            // Don't toggle - keep same toggle for next packet
+            
+            /* Small delay between packets for device to prepare next DATA packet */
+            k_busy_wait(100);  /* 100us delay */
         } else {
             /* OUT transfer */
             ret = ch375_write_block_data(ctx, data + offset, len);

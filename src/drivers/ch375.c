@@ -550,6 +550,7 @@ int ch375_send_token(struct ch375_context *ctx, uint8_t ep, uint8_t tog,
     tog_val = tog ? 0xC0 : 0x00;
     ep_pid = (ep << 4) | pid;
     
+    ch375_uart_flush_rx();
     LOG_DBG("Send token: tog=0x%02X, ep_pid=0x%02X", tog_val, ep_pid);
     
     k_mutex_lock(&ctx->lock, K_FOREVER);

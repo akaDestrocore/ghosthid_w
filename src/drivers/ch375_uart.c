@@ -112,6 +112,32 @@ int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
     return 0;
 }
 
+/* Flush UART RX buffer - discard any stale data */
+void ch375_uart_flush_rx(const struct device *dev)
+{
+    USART_TypeDef *uart_instance;
+    uint16_t dummy;
+    int attempts = 0;
+    
+    uart_instance = get_uart_instance(dev);
+    if (!uart_instance) {
+        return;
+    }
+    
+    /* Read and discard all pending data */
+    while (uart_instance->SR & USART_SR_RXNE) {
+        dummy = uart_instance->DR;  /* Reading DR clears RXNE */
+        attempts++;
+        if (attempts > 100) break;  /* Safety limit */
+    }
+    
+    /* Clear error flags */
+    if (uart_instance->SR & USART_SR_ORE) {
+        (void)uart_instance->SR;
+        (void)uart_instance->DR;
+    }
+}
+
 /* Write 16-bit data (9 data bits + 7 padding) */
 int ch375_uart_write_u16_timeout(const struct device *dev, uint16_t data, 
                                   k_timeout_t timeout)

@@ -63,4 +63,6 @@ int ch375_uart_read_u16_timeout(const struct device *dev, uint16_t *data, k_time
  * These are available when CONFIG_UART_WIDE_DATA=y is enabled in prj.conf
  */
 
+ void ch375_uart_flush_rx(const struct device *dev);
+
 #endif /* CH375_UART_H */
