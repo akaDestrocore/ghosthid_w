@@ -50,7 +50,8 @@ static inline void fill_control_setup(uint8_t *buf,
     setup->wLength = sys_cpu_to_le16(wLength);
 }
 
-/* Host control transfer - FIXED VERSION */
+/* Fixed Control Transfer - Keep toggle at 1 for all DATA packets */
+
 int ch375_host_control_transfer(struct usb_device *udev,
     uint8_t request_type, uint8_t bRequest, uint16_t wValue, uint16_t wIndex,
     uint8_t *data, uint16_t wLength, int *actual_length, uint32_t timeout)
@@ -105,16 +106,16 @@ int ch375_host_control_transfer(struct usb_device *udev,
     
     LOG_DBG("SETUP succeeded");
     
-    /* DATA stage - starts with tog=1 (DATA1) */
-    tog = 1;
-    
+    /* DATA stage - Start with tog=0, then toggle after EACH packet */
+    tog = 0;
+
     while (residue_len) {
         uint8_t len = residue_len > udev->ep0_maxpack ? udev->ep0_maxpack : residue_len;
         uint8_t actual_len = 0;
         
         if (SETUP_IN(request_type)) {
             /* IN transfer */
-            LOG_DBG("Sending IN token (tog=%d)", tog);
+            LOG_DBG("Sending IN token (tog=%d, remaining=%d)", tog, residue_len);
             
             ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_IN, &status);
             if (ret != CH375_SUCCESS) {
@@ -135,7 +136,9 @@ int ch375_host_control_transfer(struct usb_device *udev,
             
             LOG_DBG("IN token succeeded, read %d bytes", actual_len);
             
+            /* Toggle AFTER success */
             tog = tog ^ 1;
+            
             residue_len -= actual_len;
             offset += actual_len;
             
@@ -145,8 +148,6 @@ int ch375_host_control_transfer(struct usb_device *udev,
             }
         } else {
             /* OUT transfer */
-            LOG_DBG("Sending OUT token (tog=%d, len=%d)", tog, len);
-            
             ret = ch375_write_block_data(ctx, data + offset, len);
             if (ret != CH375_SUCCESS) {
                 LOG_ERR("Write data failed: %d", ret);
@@ -164,9 +165,9 @@ int ch375_host_control_transfer(struct usb_device *udev,
                 goto status_error;
             }
             
-            LOG_DBG("OUT token succeeded");
-            
+            /* Toggle AFTER success */
             tog = tog ^ 1;
+            
             residue_len -= len;
             offset += len;
         }
