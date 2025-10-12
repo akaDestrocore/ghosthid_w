@@ -26,6 +26,17 @@ LOG_MODULE_REGISTER(hid_mouse, LOG_LEVEL_INF);
 /* Transfer timeout in milliseconds */
 #define TRANSFER_TIMEOUT 0
 
+/* USB Request Type Definitions */
+#define USB_DIR_OUT             0x00
+#define USB_DIR_IN              0x80
+#define USB_TYPE_STANDARD       0x00
+#define USB_TYPE_CLASS          0x20
+#define USB_RECIP_DEVICE        0x00
+#define USB_RECIP_INTERFACE     0x01
+#define USB_RECIP_ENDPOINT      0x02
+
+#define USB_REQ_TYPE(dir, type, recip) ((dir) | (type) | (recip))
+
 /* USBHID Core Functions Implementation */
 
 void usbhid_free_report_buffer(struct usbhid_device *dev)
@@ -202,8 +213,9 @@ static int hid_get_class_descriptor(struct usb_device *udev, uint8_t interface_n
     int ret;
     
     do {
+        /* Request type: 0x81 = IN | STANDARD | INTERFACE */
         ret = ch375_host_control_transfer(udev,
-            0x80 | 0x00 | 0x01,
+            USB_REQ_TYPE(USB_DIR_IN, USB_TYPE_STANDARD, USB_RECIP_INTERFACE),
             USB_SREQ_GET_DESCRIPTOR,
             type << 8,
             interface_num,
@@ -247,8 +259,9 @@ static void set_idle(struct usb_device *udev, uint8_t interface_num,
 {
     int ret;
     
+    /* Request type: 0x21 = OUT | CLASS | INTERFACE */
     ret = ch375_host_control_transfer(udev,
-        0x00 | 0x20 | 0x01,
+        USB_REQ_TYPE(USB_DIR_OUT, USB_TYPE_CLASS, USB_RECIP_INTERFACE),
         HID_SET_IDLE,
         (duration << 8) | report_id,
         interface_num,
@@ -269,8 +282,9 @@ static int set_report(struct usb_device *udev, uint8_t interface_num,
     uint8_t data_fragment = 0x01;
     
     do {
+        /* Request type: 0x21 = OUT | CLASS | INTERFACE */
         ret = ch375_host_control_transfer(udev,
-            0x00 | 0x20 | 0x01,
+            USB_REQ_TYPE(USB_DIR_OUT, USB_TYPE_CLASS, USB_RECIP_INTERFACE),
             HID_SET_REPORT,
             (report_type << 8) | report_id,
             interface_num,

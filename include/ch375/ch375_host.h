@@ -29,6 +29,18 @@ enum ch375_host_errno {
 /* USB Control Setup Size */
 #define CONTROL_SETUP_SIZE      8
 
+/* USB Request Type field composition */
+#define USB_DIR_OUT             0x00
+#define USB_DIR_IN              0x80
+#define USB_TYPE_STANDARD       0x00
+#define USB_TYPE_CLASS          0x20
+#define USB_TYPE_VENDOR         0x40
+#define USB_RECIP_DEVICE        0x00
+#define USB_RECIP_INTERFACE     0x01
+#define USB_RECIP_ENDPOINT      0x02
+
+#define USB_REQ_TYPE(dir, type, recip) ((dir) | (type) | (recip))
+
 /* USB Endpoint Structure */
 struct usb_endpoint {
     uint8_t  ep_num;

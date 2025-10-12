@@ -1,4 +1,4 @@
-/* CH375 USB Host Mode Implementation for Zephyr */
+/* CH375 USB Host Mode - COMPLETE FIX with correct USB request types */
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -13,8 +13,20 @@
 
 LOG_MODULE_REGISTER(ch375_host, LOG_LEVEL_DBG);
 
-#define SETUP_IN(x) ((x) & USB_ENDPOINT_IN)
-#define EP_IN(x) ((x) & USB_ENDPOINT_IN)
+/* USB Request Type Definitions - DO NOT USE Zephyr's confusing macros */
+#define USB_DIR_OUT             0x00
+#define USB_DIR_IN              0x80
+#define USB_TYPE_STANDARD       0x00
+#define USB_TYPE_CLASS          0x20
+#define USB_TYPE_VENDOR         0x40
+#define USB_RECIP_DEVICE        0x00
+#define USB_RECIP_INTERFACE     0x01
+#define USB_RECIP_ENDPOINT      0x02
+
+#define USB_REQ_TYPE(dir, type, recip) ((dir) | (type) | (recip))
+
+#define SETUP_IN(x) ((x) & 0x80)
+#define EP_IN(x) ((x) & 0x80)
 
 #define RESET_WAIT_DEVICE_RECONNECT_TIMEOUT_MS 1000
 #define TRANSFER_TIMEOUT 5000
@@ -22,7 +34,10 @@ LOG_MODULE_REGISTER(ch375_host, LOG_LEVEL_DBG);
 #define USB_DEFAULT_ADDRESS 1
 #define USB_DEFAULT_EP0_MAX_PACKSIZE 8
 
-/* Fill control setup packet using Zephyr's structure */
+/* Private function prototypes */
+static int get_ep(struct usb_device *udev, uint8_t ep_addr, struct usb_endpoint **ep);
+
+/* Fill control setup packet */
 static inline void fill_control_setup(uint8_t *buf,
     uint8_t request_type, uint8_t bRequest, uint16_t wValue, 
     uint16_t wIndex, uint16_t wLength)
@@ -35,7 +50,7 @@ static inline void fill_control_setup(uint8_t *buf,
     setup->wLength = sys_cpu_to_le16(wLength);
 }
 
-/* Host control transfer */
+/* Host control transfer - FIXED VERSION */
 int ch375_host_control_transfer(struct usb_device *udev,
     uint8_t request_type, uint8_t bRequest, uint16_t wValue, uint16_t wIndex,
     uint8_t *data, uint16_t wLength, int *actual_length, uint32_t timeout)
@@ -43,7 +58,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
     struct ch375_context *ctx;
     uint8_t setup_buf[CONTROL_SETUP_SIZE];
     int residue_len = wLength;
-    uint8_t tog = 0;
+    uint8_t tog;
     int offset = 0;
     uint8_t status;
     int ret;
@@ -66,8 +81,9 @@ int ch375_host_control_transfer(struct usb_device *udev,
         return CH375_HOST_ERROR;
     }
     
-    /* SETUP stage */
-    LOG_DBG("Sending SETUP packet");
+    /* SETUP stage - always uses tog=0 */
+    LOG_DBG("Sending SETUP (reqtype=0x%02X, req=0x%02X, val=0x%04X, idx=0x%04X, len=%d)",
+           request_type, bRequest, wValue, wIndex, wLength);
     fill_control_setup(setup_buf, request_type, bRequest, wValue, wIndex, wLength);
     
     ret = ch375_write_block_data(ctx, setup_buf, CONTROL_SETUP_SIZE);
@@ -76,7 +92,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
         return CH375_HOST_ERROR;
     }
     
-    ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_SETUP, &status);
+    ret = ch375_send_token(ctx, 0, 0, CH375_USB_PID_SETUP, &status);
     if (ret != CH375_SUCCESS) {
         LOG_ERR("Send SETUP token failed: %d", ret);
         return CH375_HOST_ERROR;
@@ -87,15 +103,19 @@ int ch375_host_control_transfer(struct usb_device *udev,
         goto status_error;
     }
     
-    tog = tog ^ 1;
+    LOG_DBG("SETUP succeeded");
     
-    /* DATA stage */
+    /* DATA stage - starts with tog=1 (DATA1) */
+    tog = 1;
+    
     while (residue_len) {
         uint8_t len = residue_len > udev->ep0_maxpack ? udev->ep0_maxpack : residue_len;
         uint8_t actual_len = 0;
         
         if (SETUP_IN(request_type)) {
             /* IN transfer */
+            LOG_DBG("Sending IN token (tog=%d)", tog);
+            
             ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_IN, &status);
             if (ret != CH375_SUCCESS) {
                 LOG_ERR("Send IN token failed: %d", ret);
@@ -103,11 +123,9 @@ int ch375_host_control_transfer(struct usb_device *udev,
             }
             
             if (status != CH375_USB_INT_SUCCESS) {
-                LOG_ERR("IN failed, status: 0x%02X", status);
+                LOG_ERR("IN token failed, status: 0x%02X", status);
                 goto status_error;
             }
-            
-            tog = tog ^ 1;
             
             ret = ch375_read_block_data(ctx, data + offset, len, &actual_len);
             if (ret != CH375_SUCCESS) {
@@ -115,15 +133,20 @@ int ch375_host_control_transfer(struct usb_device *udev,
                 return CH375_HOST_ERROR;
             }
             
+            LOG_DBG("IN token succeeded, read %d bytes", actual_len);
+            
+            tog = tog ^ 1;
             residue_len -= actual_len;
             offset += actual_len;
             
             if (actual_len < udev->ep0_maxpack) {
-                /* Short packet, done */
+                LOG_DBG("Short packet detected, ending DATA stage");
                 break;
             }
         } else {
             /* OUT transfer */
+            LOG_DBG("Sending OUT token (tog=%d, len=%d)", tog, len);
+            
             ret = ch375_write_block_data(ctx, data + offset, len);
             if (ret != CH375_SUCCESS) {
                 LOG_ERR("Write data failed: %d", ret);
@@ -137,9 +160,11 @@ int ch375_host_control_transfer(struct usb_device *udev,
             }
             
             if (status != CH375_USB_INT_SUCCESS) {
-                LOG_ERR("OUT failed, status: 0x%02X", status);
+                LOG_ERR("OUT token failed, status: 0x%02X", status);
                 goto status_error;
             }
+            
+            LOG_DBG("OUT token succeeded");
             
             tog = tog ^ 1;
             residue_len -= len;
@@ -147,16 +172,18 @@ int ch375_host_control_transfer(struct usb_device *udev,
         }
     }
     
-    /* STATUS stage */
-    tog = 1;
+    /* STATUS stage - always uses tog=1 (DATA1) */
     if (SETUP_IN(request_type)) {
-        ret = ch375_write_block_data(ctx, data + offset, 0);
+        /* IN control: STATUS is OUT with no data */
+        LOG_DBG("Sending STATUS OUT");
+        
+        ret = ch375_write_block_data(ctx, NULL, 0);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Write status OUT failed: %d", ret);
             return CH375_HOST_ERROR;
         }
         
-        ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_OUT, &status);
+        ret = ch375_send_token(ctx, 0, 1, CH375_USB_PID_OUT, &status);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Send status OUT token failed: %d", ret);
             return CH375_HOST_ERROR;
@@ -167,7 +194,10 @@ int ch375_host_control_transfer(struct usb_device *udev,
             goto status_error;
         }
     } else {
-        ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_IN, &status);
+        /* OUT control: STATUS is IN with no data */
+        LOG_DBG("Sending STATUS IN");
+        
+        ret = ch375_send_token(ctx, 0, 1, CH375_USB_PID_IN, &status);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Send status IN token failed: %d", ret);
             return CH375_HOST_ERROR;
@@ -178,6 +208,8 @@ int ch375_host_control_transfer(struct usb_device *udev,
             goto status_error;
         }
     }
+    
+    LOG_DBG("Control transfer completed, transferred %d bytes", offset);
     
     if (actual_length) {
         *actual_length = offset;
@@ -194,6 +226,139 @@ status_error:
     }
     LOG_ERR("Unhandled status: 0x%02X", status);
     return CH375_HOST_ERROR;
+}
+
+/* Get device descriptor - FIXED */
+static int get_device_descriptor(struct usb_device *udev, uint8_t *buf)
+{
+    int actual_len = 0;
+    int ret;
+    struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)buf;
+    
+    /* Request type: 0x80 = IN | STANDARD | DEVICE */
+    ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_IN, USB_TYPE_STANDARD, USB_RECIP_DEVICE),
+        USB_SREQ_GET_DESCRIPTOR,
+        USB_DESC_DEVICE << 8, 0,
+        buf, sizeof(struct usb_device_descriptor), &actual_len, TRANSFER_TIMEOUT);
+        
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Get device descriptor failed: %d", ret);
+        return CH375_HOST_ERROR;
+    }
+    
+    if (actual_len < sizeof(struct usb_device_descriptor)) {
+        LOG_ERR("Device descriptor too short");
+        return CH375_HOST_ERROR;
+    }
+    
+    if (dev_desc->bDescriptorType != USB_DESC_DEVICE) {
+        LOG_ERR("Invalid device descriptor type: 0x%02X", dev_desc->bDescriptorType);
+        return CH375_HOST_ERROR;
+    }
+    
+    return CH375_HOST_SUCCESS;
+}
+
+/* Get configuration descriptor - FIXED */
+static int get_config_descriptor(struct usb_device *udev, uint8_t *buf, uint16_t len)
+{
+    int actual_len = 0;
+    int ret;
+    
+    /* Request type: 0x80 = IN | STANDARD | DEVICE */
+    ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_IN, USB_TYPE_STANDARD, USB_RECIP_DEVICE),
+        USB_SREQ_GET_DESCRIPTOR,
+        USB_DT_CONFIG << 8, 0,
+        buf, len, &actual_len, TRANSFER_TIMEOUT);
+        
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Get config descriptor failed: %d", ret);
+        return CH375_HOST_ERROR;
+    }
+    
+    if (actual_len < len) {
+        LOG_ERR("Config descriptor too short");
+        return CH375_HOST_ERROR;
+    }
+    
+    return CH375_HOST_SUCCESS;
+}
+
+/* Set device address - FIXED */
+static int ch375_set_dev_address(struct usb_device *udev, uint8_t addr)
+{
+    int ret;
+    
+    /* Request type: 0x00 = OUT | STANDARD | DEVICE */
+    ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_OUT, USB_TYPE_STANDARD, USB_RECIP_DEVICE),
+        USB_SREQ_SET_ADDRESS,
+        addr, 0, NULL, 0, NULL, TRANSFER_TIMEOUT);
+        
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Set address failed: %d", ret);
+        return CH375_HOST_ERROR;
+    }
+    
+    /* Tell CH375 the new address */
+    ret = ch375_set_usb_addr(udev->context, addr);
+    if (ret != CH375_SUCCESS) {
+        LOG_ERR("Set CH375 USB addr failed: %d", ret);
+        return CH375_HOST_ERROR;
+    }
+    
+    return CH375_HOST_SUCCESS;
+}
+
+/* Clear endpoint stall - FIXED */
+int ch375_host_clear_stall(struct usb_device *udev, uint8_t ep)
+{
+    struct usb_endpoint *endpoint = NULL;
+    int ret;
+    
+    if (ep != 0) {
+        ret = get_ep(udev, ep, &endpoint);
+        if (ret < 0) {
+            LOG_ERR("Endpoint 0x%02X not found", ep);
+            return CH375_HOST_PARAM_INVALID;
+        }
+    }
+    
+    /* Request type: 0x02 = OUT | STANDARD | ENDPOINT */
+    ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_OUT, USB_TYPE_STANDARD, USB_RECIP_ENDPOINT),
+        USB_SREQ_CLEAR_FEATURE,
+        0, ep, NULL, 0, NULL, TRANSFER_TIMEOUT);
+        
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Clear feature failed: %d", ret);
+        return CH375_HOST_ERROR;
+    }
+    
+    if (endpoint) {
+        endpoint->tog = 0;
+    }
+    
+    return CH375_HOST_SUCCESS;
+}
+
+/* Set configuration - FIXED */
+int ch375_host_set_configuration(struct usb_device *udev, uint8_t configuration)
+{
+    /* Request type: 0x00 = OUT | STANDARD | DEVICE */
+    int ret = ch375_host_control_transfer(udev,
+        USB_REQ_TYPE(USB_DIR_OUT, USB_TYPE_STANDARD, USB_RECIP_DEVICE),
+        USB_SREQ_SET_CONFIGURATION,
+        configuration, 0, NULL, 0, NULL, TRANSFER_TIMEOUT);
+        
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("Set configuration failed: %d", ret);
+        return CH375_HOST_ERROR;
+    }
+    
+    return CH375_HOST_SUCCESS;
 }
 
 /* Get endpoint from device */
@@ -334,7 +499,7 @@ int ch375_host_interrupt_transfer(struct usb_device *udev,
     return ch375_host_bulk_transfer(udev, ep, data, length, actual_length, timeout);
 }
 
-/* Parse endpoint descriptor - use Zephyr types */
+/* Parse endpoint descriptor */
 static void parse_endpoint_descriptor(struct usb_interface *interface,
                                      struct usb_ep_descriptor *desc)
 {
@@ -349,7 +514,7 @@ static void parse_endpoint_descriptor(struct usb_interface *interface,
     interface->endpoint_cnt++;
 }
 
-/* Parse interface descriptor - use Zephyr types */
+/* Parse interface descriptor */
 static void parse_interface_descriptor(struct usb_device *udev,
                                       struct usb_if_descriptor *desc)
 {
@@ -363,14 +528,13 @@ static void parse_interface_descriptor(struct usb_device *udev,
     udev->interface_cnt++;
 }
 
-/* Parse configuration descriptor - use Zephyr types */
+/* Parse configuration descriptor */
 static int parse_config_descriptor(struct usb_device *udev)
 {
     struct usb_desc_header *desc = (struct usb_desc_header *)udev->raw_conf_desc;
     void *raw_conf_desc_end = (uint8_t *)udev->raw_conf_desc + udev->raw_conf_desc_len;
     
     while ((void *)desc < raw_conf_desc_end) {
-        /* Skip to next descriptor */
         desc = (struct usb_desc_header *)((uint8_t *)desc + desc->bLength);
         
         switch (desc->bDescriptorType) {
@@ -388,138 +552,8 @@ static int parse_config_descriptor(struct usb_device *udev)
             break;
             
         default:
-            /* Skip unknown descriptors */
             break;
         }
-    }
-    
-    return CH375_HOST_SUCCESS;
-}
-
-/* Get configuration descriptor - use Zephyr constants */
-static int get_config_descriptor(struct usb_device *udev, uint8_t *buf, uint16_t len)
-{
-    int actual_len = 0;
-    int ret;
-    
-    ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_IN | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
-        USB_SREQ_GET_DESCRIPTOR,
-        USB_DT_CONFIG << 8, 0,
-        buf, len, &actual_len, TRANSFER_TIMEOUT);
-        
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("Get config descriptor failed: %d", ret);
-        return CH375_HOST_ERROR;
-    }
-    
-    if (actual_len < len) {
-        LOG_ERR("Config descriptor too short");
-        return CH375_HOST_ERROR;
-    }
-    
-    return CH375_HOST_SUCCESS;
-}
-
-/* Get device descriptor - use Zephyr types */
-static int get_device_descriptor(struct usb_device *udev, uint8_t *buf)
-{
-    int actual_len = 0;
-    int ret;
-    struct usb_device_descriptor *dev_desc = (struct usb_device_descriptor *)buf;
-    
-    ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_IN | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
-        USB_SREQ_GET_DESCRIPTOR,
-        USB_DESC_DEVICE << 8, 0,
-        buf, sizeof(struct usb_device_descriptor), &actual_len, TRANSFER_TIMEOUT);
-        
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("Get device descriptor failed: %d", ret);
-        return CH375_HOST_ERROR;
-    }
-    
-    if (actual_len < sizeof(struct usb_device_descriptor)) {
-        LOG_ERR("Device descriptor too short");
-        return CH375_HOST_ERROR;
-    }
-    
-    if (dev_desc->bDescriptorType != USB_DESC_DEVICE) {
-        LOG_ERR("Invalid device descriptor type: 0x%02X", dev_desc->bDescriptorType);
-        return CH375_HOST_ERROR;
-    }
-    
-    return CH375_HOST_SUCCESS;
-}
-
-/* Set device address */
-static int ch375_set_dev_address(struct usb_device *udev, uint8_t addr)
-{
-    int ret;
-    
-    /* Send SET_ADDRESS to device */
-    ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_OUT | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
-        USB_SREQ_SET_ADDRESS,
-        addr, 0, NULL, 0, NULL, TRANSFER_TIMEOUT);
-        
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("Set address failed: %d", ret);
-        return CH375_HOST_ERROR;
-    }
-    
-    /* Tell CH375 the new address */
-    ret = ch375_set_usb_addr(udev->context, addr);
-    if (ret != CH375_SUCCESS) {
-        LOG_ERR("Set CH375 USB addr failed: %d", ret);
-        return CH375_HOST_ERROR;
-    }
-    
-    return CH375_HOST_SUCCESS;
-}
-
-/* Clear endpoint stall */
-int ch375_host_clear_stall(struct usb_device *udev, uint8_t ep)
-{
-    struct usb_endpoint *endpoint = NULL;
-    int ret;
-    
-    if (ep != 0) {
-        ret = get_ep(udev, ep, &endpoint);
-        if (ret < 0) {
-            LOG_ERR("Endpoint 0x%02X not found", ep);
-            return CH375_HOST_PARAM_INVALID;
-        }
-    }
-    
-    ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_IN | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_RECIPIENT_ENDPOINT,
-        USB_SREQ_CLEAR_FEATURE,
-        0, ep, NULL, 0, NULL, TRANSFER_TIMEOUT);
-        
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("Clear feature failed: %d", ret);
-        return CH375_HOST_ERROR;
-    }
-    
-    if (endpoint) {
-        endpoint->tog = 0;
-    }
-    
-    return CH375_HOST_SUCCESS;
-}
-
-/* Set configuration */
-int ch375_host_set_configuration(struct usb_device *udev, uint8_t configuration)
-{
-    int ret = ch375_host_control_transfer(udev,
-        USB_ENDPOINT_OUT | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_DIR_TO_DEVICE,
-        USB_SREQ_SET_CONFIGURATION,
-        configuration, 0, NULL, 0, NULL, TRANSFER_TIMEOUT);
-        
-    if (ret != CH375_HOST_SUCCESS) {
-        LOG_ERR("Set configuration failed: %d", ret);
-        return CH375_HOST_ERROR;
     }
     
     return CH375_HOST_SUCCESS;
@@ -536,7 +570,6 @@ static int reset_dev(struct ch375_context *ctx)
         return CH375_HOST_ERROR;
     }
     
-    /* Wait for device reset */
     k_msleep(20);
     
     ret = ch375_set_usb_mode(ctx, CH375_USB_MODE_SOF);
@@ -549,7 +582,6 @@ static int reset_dev(struct ch375_context *ctx)
     if (ret != CH375_HOST_SUCCESS) {
         LOG_ERR("Wait device reconnect failed: %d", ret);
         
-        /* Try to recover */
         ret = ch375_set_usb_mode(ctx, CH375_USB_MODE_SOF);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Set USB SOF mode failed: %d", ret);
@@ -558,7 +590,6 @@ static int reset_dev(struct ch375_context *ctx)
         return CH375_HOST_DEV_DISCONNECT;
     }
     
-    /* Wait for connection to stabilize */
     k_msleep(100);
     return CH375_HOST_SUCCESS;
 }
@@ -653,7 +684,7 @@ void ch375_host_udev_close(struct usb_device *udev)
     memset(udev, 0, sizeof(struct usb_device));
 }
 
-/* Open USB device - use Zephyr types */
+/* Open USB device */
 int ch375_host_udev_open(struct ch375_context *ctx, struct usb_device *udev)
 {
     struct usb_cfg_descriptor short_conf_desc = {0};
@@ -711,7 +742,6 @@ int ch375_host_udev_open(struct ch375_context *ctx, struct usb_device *udev)
     udev->raw_conf_desc_len = conf_total_len;
     LOG_INF("Config total length = %d", conf_total_len);
     
-    /* Get full config descriptor */
     udev->raw_conf_desc = k_malloc(conf_total_len);
     if (!udev->raw_conf_desc) {
         LOG_ERR("Allocate config descriptor buffer failed");
@@ -726,7 +756,6 @@ int ch375_host_udev_open(struct ch375_context *ctx, struct usb_device *udev)
         goto failed;
     }
     
-    /* Parse config descriptor */
     ret = parse_config_descriptor(udev);
     if (ret != CH375_HOST_SUCCESS) {
         LOG_ERR("Parse config descriptor failed: %d", ret);
@@ -772,7 +801,6 @@ int ch375_host_wait_device_connect(struct ch375_context *ctx, uint32_t timeout_m
         }
         
         if (conn_status != CH375_USB_INT_DISCONNECT) {
-            /* Device connected */
             return CH375_HOST_SUCCESS;
         }
         
@@ -793,7 +821,7 @@ int ch375_host_init(struct ch375_context *ctx, uint32_t work_baudrate)
     }
     
     LOG_INF("Initializing CH375 host mode");
-    k_msleep(50); /* Wait for CH375 to be ready */
+    k_msleep(50);
     
     ret = ch375_check_exist(ctx);
     if (ret != CH375_SUCCESS) {
@@ -802,7 +830,6 @@ int ch375_host_init(struct ch375_context *ctx, uint32_t work_baudrate)
     }
     LOG_INF("CH375 exists");
     
-    /* Set USB mode to host with SOF */
     ret = ch375_set_usb_mode(ctx, CH375_USB_MODE_SOF);
     if (ret != CH375_SUCCESS) {
         LOG_ERR("Set USB mode failed: %d", ret);
