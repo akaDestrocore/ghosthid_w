@@ -345,6 +345,199 @@ static int init_usb_device(void)
     return 0;
 }
 
+static int open_device_in(device_input_t *devin)
+{
+    struct usb_device *udev = &devin->usbdev;
+    struct usbhid_device *hiddev = &devin->hiddev;
+    struct hid_mouse *mouse = &devin->mouse;
+    struct hid_keyboard *keyboard = &devin->keyboard;
+    int ret;
+    
+    LOG_INF("%s: Opening USB device...", devin->name);
+    
+    ret = ch375_host_udev_open(devin->ch375_ctx, udev);
+    if (ret != CH375_HOST_SUCCESS) {
+        LOG_ERR("%s: Failed to open USB device: %d", devin->name, ret);
+        return -1;
+    }
+    
+    LOG_INF("%s: USB device opened (VID:PID = %04X:%04X)",
+           devin->name, udev->vid, udev->pid);
+    
+    /* Open USBHID device (interface 0) */
+    ret = usbhid_open(udev, 0, hiddev);
+    if (ret != USBHID_SUCCESS) {
+        LOG_ERR("%s: Failed to open USBHID: %d", devin->name, ret);
+        ch375_host_udev_close(udev);
+        return -1;
+    }
+    
+    LOG_INF("%s: USBHID opened (type: %s)",
+           devin->name,
+           hiddev->hid_type == USBHID_TYPE_MOUSE ? "Mouse" :
+           hiddev->hid_type == USBHID_TYPE_KEYBOARD ? "Keyboard" : "Unknown");
+    
+    /* Open HID class device */
+    if (hiddev->hid_type == USBHID_TYPE_MOUSE) {
+        ret = hid_mouse_open(hiddev, mouse);
+        if (ret != USBHID_SUCCESS) {
+            LOG_ERR("%s: Failed to open mouse: %d", devin->name, ret);
+            goto cleanup;
+        }
+        LOG_INF("%s: Mouse opened", devin->name);
+    } else if (hiddev->hid_type == USBHID_TYPE_KEYBOARD) {
+        ret = hid_keyboard_open(hiddev, keyboard);
+        if (ret != USBHID_SUCCESS) {
+            LOG_ERR("%s: Failed to open keyboard: %d", devin->name, ret);
+            goto cleanup;
+        }
+        LOG_INF("%s: Keyboard opened", devin->name);
+    } else {
+        LOG_ERR("%s: Unsupported HID type: %d", devin->name, hiddev->hid_type);
+        goto cleanup;
+    }
+    
+    return 0;
+
+cleanup:
+    usbhid_close(hiddev);
+    ch375_host_udev_close(udev);
+    return -1;
+}
+
+/* Wait for all devices to connect */
+static void wait_all_device_connect(void)
+{
+    uint8_t all_connected = 0;
+    int ret;
+    
+    while (!all_connected) {
+        all_connected = 1;
+        
+        for (int i = 0; i < CH375_MODULE_NUM; i++) {
+            device_input_t *devin = &s_arr_devin[i];
+            
+            if (devin->is_connected) {
+                continue;
+            }
+            
+            ret = ch375_host_wait_device_connect(devin->ch375_ctx, 500);
+            if (ret == CH375_HOST_SUCCESS) {
+                LOG_INF("%s: Device connected", devin->name);
+                devin->is_connected = 0;  /* Not fully enumerated yet */
+            } else if (ret == CH375_HOST_ERROR) {
+                LOG_ERR("%s: Error waiting for device", devin->name);
+                all_connected = 0;
+            } else {
+                /* Timeout - keep waiting */
+                all_connected = 0;
+            }
+        }
+        
+        if (!all_connected) {
+            k_msleep(100);
+        }
+    }
+}
+
+/* Open all input devices */
+static int open_all_device_in(void)
+{
+    int ret;
+    
+    for (int i = 0; i < CH375_MODULE_NUM; i++) {
+        ret = open_device_in(&s_arr_devin[i]);
+        if (ret < 0) {
+            LOG_ERR("%s: Failed to enumerate", s_arr_devin[i].name);
+            return ret;
+        }
+        s_arr_devin[i].is_connected = 1;
+    }
+    
+    return 0;
+}
+
+/* Open device output (USB composite HID) */
+static void open_device_out(void)
+{
+    uint8_t status;
+    
+    for (int i = 0; i < CH375_MODULE_NUM; i++) {
+        device_input_t *devin = &s_arr_devin[i];
+        struct usbhid_device *hiddev = &devin->hiddev;
+        
+        if (!devin->is_connected) {
+            continue;
+        }
+        
+        status = composite_hid_register_interface(i,
+            hiddev->raw_hid_report_desc,
+            hiddev->raw_hid_report_desc_len,
+            8, 1);
+            
+        if (status != 0) {
+            LOG_ERR("Failed to register HID interface %d", i);
+        }
+    }
+    
+    status = composite_hid_init();
+    if (status != 0) {
+        LOG_ERR("Failed to initialize composite HID");
+    }
+}
+
+/* Main HID processing loop */
+static void loop_handle_devices(void)
+{
+    int ret;
+    
+    while (1) {
+        for (int i = 0; i < CH375_MODULE_NUM; i++) {
+            device_input_t *devin = &s_arr_devin[i];
+            
+            if (!devin->is_connected) {
+                continue;
+            }
+            
+            if (devin->hiddev.hid_type == USBHID_TYPE_MOUSE) {
+                ret = handle_mouse(&devin->mouse, devin->interface_num);
+            } else if (devin->hiddev.hid_type == USBHID_TYPE_KEYBOARD) {
+                ret = handle_keyboard(&devin->keyboard, devin->interface_num);
+            } else {
+                continue;
+            }
+            
+            if (ret == USBHID_NO_DEV) {
+                LOG_ERR("%s: Device disconnected", devin->name);
+                return;  /* Exit loop to restart */
+            }
+        }
+        
+        k_msleep(1);  /* 1ms polling interval */
+    }
+}
+
+/* Close all devices */
+static void close_all_devices(void)
+{
+    for (int i = 0; i < CH375_MODULE_NUM; i++) {
+        device_input_t *devin = &s_arr_devin[i];
+        
+        if (devin->hiddev.hid_type == USBHID_TYPE_MOUSE) {
+            hid_mouse_close(&devin->mouse);
+        } else if (devin->hiddev.hid_type == USBHID_TYPE_KEYBOARD) {
+            hid_keyboard_close(&devin->keyboard);
+        }
+        
+        usbhid_close(&devin->hiddev);
+        ch375_host_udev_close(&devin->usbdev);
+        
+        devin->is_connected = 0;
+    }
+    
+    composite_hid_cleanup();
+}
+
 int main(void)
 {
     int ret;
@@ -374,7 +567,7 @@ int main(void)
     }
     LOG_INF("GPIO C is ready");
     
-    /* Get UART devices using DT macros - THIS IS THE FIX */
+    /* Get UART devices using DT macros */
     const struct device *uart2 = DEVICE_DT_GET(DT_NODELABEL(usart2));
     if (!device_is_ready(uart2)) {
         LOG_ERR("USART2 not ready");
@@ -401,10 +594,82 @@ int main(void)
     LOG_INF("=================================");
 
     /* Initialize device inputs */
-ret = init_device_input_dt(&s_arr_devin[0], "USART2", uart2, &ch375a_int, "CH375A", 0);
-if (ret) {
-    LOG_ERR("Failed to initialize CH375A");
-    return ret;
+    ret = init_device_input_dt(&s_arr_devin[0], "USART2", uart2, &ch375a_int, "CH375A", 0);
+    if (ret) {
+        LOG_ERR("Failed to initialize CH375A");
+        return ret;
+    }
+
+    ret = init_device_input_dt(&s_arr_devin[1], "USART3", uart3, &ch375b_int, "CH375B", 1);
+    if (ret) {
+        LOG_ERR("Failed to initialize CH375B");
+        return ret;
+    }
+    
+    /* Initialize AGP context */
+    ret = agp_open(&s_agp_ctx);
+    if (ret < 0) {
+        LOG_ERR("Failed to open AGP context");
+        return ret;
+    }
+    
+    /* Main loop - wait for devices and process */
+    while (1) {
+        LOG_INF("=================================");
+        LOG_INF("Waiting for USB devices...");
+        LOG_INF("=================================");
+        
+        /* Wait for both devices to connect */
+        wait_all_device_connect();
+        
+        LOG_INF("=================================");
+        LOG_INF("Enumerating devices...");
+        LOG_INF("=================================");
+        
+        /* Enumerate both devices */
+        ret = open_all_device_in();
+        if (ret < 0) {
+            LOG_ERR("Failed to enumerate devices");
+            k_msleep(1000);
+            continue;
+        }
+        
+        LOG_INF("=================================");
+        LOG_INF("Initializing USB device output...");
+        LOG_INF("=================================");
+        
+        /* Register composite HID interfaces */
+        open_device_out();
+        
+        /* Enable USB device */
+        ret = usb_enable(NULL);
+        if (ret) {
+            LOG_ERR("Failed to enable USB device: %d", ret);
+            close_all_devices();
+            k_msleep(1000);
+            continue;
+        }
+        
+        LOG_INF("=================================");
+        LOG_INF("Starting HID processing loop...");
+        LOG_INF("=================================");
+        
+        /* Process HID reports */
+        loop_handle_devices();
+        
+        /* If we get here, a device disconnected */
+        LOG_WRN("Device disconnected, restarting...");
+        
+        /* Disable USB device */
+        usb_disable();
+        
+        /* Close all devices */
+        close_all_devices();
+        
+        k_msleep(1000);
+    }
+    
+    return 0;
 }
 
 ret = init_device_input_dt(&s_arr_devin[1], "USART3", uart3, &ch375b_int, "CH375B", 1);

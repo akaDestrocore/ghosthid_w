@@ -31,44 +31,84 @@ static USART_TypeDef *get_uart_instance(const struct device *dev);
 int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
 {
     USART_TypeDef *uart_instance;
+    uint32_t tmpreg;
     
     if (!device_is_ready(dev)) {
         LOG_ERR("UART device not ready");
         return -ENODEV;
     }
     
-    /* Get USART instance from device */
     uart_instance = get_uart_instance(dev);
     if (!uart_instance) {
         LOG_ERR("Unknown UART device: %s", dev->name);
         return -ENOTSUP;
     }
     
-    /* Disable UART before configuration */
-    LL_USART_Disable(uart_instance);
+    LOG_INF("Configuring %s for 9-bit mode at %d baud", dev->name, baudrate);
     
-    /* Configure for 9-bit mode */
-    LL_USART_SetDataWidth(uart_instance, LL_USART_DATAWIDTH_9B);
-    LL_USART_SetParity(uart_instance, LL_USART_PARITY_NONE);
-    LL_USART_SetStopBitsLength(uart_instance, LL_USART_STOPBITS_1);
+    /* Disable UART */
+    uart_instance->CR1 &= ~USART_CR1_UE;
     
-    /* Set baudrate */
-    LL_USART_SetBaudRate(uart_instance, 
-                         SystemCoreClock,
-                         LL_USART_OVERSAMPLING_16,
-                         baudrate);
-    
-    /* Enable TX and RX */
-    LL_USART_SetTransferDirection(uart_instance, 
-                                  LL_USART_DIRECTION_TX_RX);
-    
-    /* Re-enable UART */
-    LL_USART_Enable(uart_instance);
-    
-    /* Wait for UART to be ready */
+    /* Wait for disable */
     k_busy_wait(100);
     
-    LOG_INF("Configured UART for 9-bit mode at %d baud", baudrate);
+    /* Clear all flags */
+    uart_instance->SR = 0;
+    
+    /* Configure CR1 register */
+    tmpreg = uart_instance->CR1;
+    
+    /* Clear M, PCE, PS, TE and RE bits */
+    tmpreg &= ~(USART_CR1_M | USART_CR1_PCE | USART_CR1_PS | 
+                USART_CR1_TE | USART_CR1_RE);
+    
+    /* Set 9-bit mode (M=1), no parity (PCE=0), enable TX and RX */
+    tmpreg |= USART_CR1_M | USART_CR1_TE | USART_CR1_RE;
+    
+    uart_instance->CR1 = tmpreg;
+    
+    /* Configure CR2 - 1 stop bit */
+    tmpreg = uart_instance->CR2;
+    tmpreg &= ~USART_CR2_STOP;
+    uart_instance->CR2 = tmpreg;
+    
+    /* Configure CR3 - no hardware flow control */
+    uart_instance->CR3 = 0;
+    
+    /* Set baud rate 
+     * BRR = (UART_CLOCK + (baudrate/2)) / baudrate
+     * For STM32F4, USART2/3 are on APB1 (typically 42MHz)
+     * UART4 is also on APB1
+     */
+    uint32_t apb_clock;
+    
+    if (uart_instance == USART2 || uart_instance == USART3 || uart_instance == UART4) {
+        /* APB1 clock */
+        apb_clock = SystemCoreClock / 4;  // Assuming APB1 = HCLK/4 (42MHz)
+    } else {
+        /* APB2 clock */
+        apb_clock = SystemCoreClock / 2;  // Assuming APB2 = HCLK/2 (84MHz)
+    }
+    
+    uint32_t usartdiv = (apb_clock + (baudrate / 2)) / baudrate;
+    uart_instance->BRR = usartdiv;
+    
+    LOG_INF("APB clock: %u Hz, BRR value: 0x%04X", apb_clock, usartdiv);
+    
+    /* Enable UART */
+    uart_instance->CR1 |= USART_CR1_UE;
+    
+    /* Wait for UART to be ready */
+    k_busy_wait(2000);  // 2ms
+    
+    /* Clear status flags again */
+    uart_instance->SR = 0;
+    
+    /* Read DR to clear RXNE if set */
+    (void)uart_instance->DR;
+    
+    LOG_INF("UART configuration complete");
+    
     return 0;
 }
 
@@ -88,29 +128,30 @@ int ch375_uart_write_u16_timeout(const struct device *dev, uint16_t data,
         timeout_ms = timeout.ticks * 1000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC;
     }
     
-    /* Get USART instance */
     uart_instance = get_uart_instance(dev);
     if (!uart_instance) {
         return -ENOTSUP;
     }
     
-    /* Wait for TX buffer to be empty */
-    while (!LL_USART_IsActiveFlag_TXE(uart_instance)) {
+    /* Wait for TX empty */
+    while (!(uart_instance->SR & USART_SR_TXE)) {
         if ((k_uptime_get() - start_time) >= timeout_ms) {
+            LOG_ERR("TX timeout");
             return -ETIMEDOUT;
         }
-        k_yield();
+        k_busy_wait(10);
     }
     
-    /* Write 9-bit data (only lower 9 bits used) */
-    LL_USART_TransmitData9(uart_instance, data & 0x1FF);
+    /* Write 9-bit data (only bits 0-8 are used) */
+    uart_instance->DR = data & 0x01FF;
     
     /* Wait for transmission complete */
-    while (!LL_USART_IsActiveFlag_TC(uart_instance)) {
+    while (!(uart_instance->SR & USART_SR_TC)) {
         if ((k_uptime_get() - start_time) >= timeout_ms) {
+            LOG_ERR("TC timeout");
             return -ETIMEDOUT;
         }
-        k_yield();
+        k_busy_wait(10);
     }
     
     return 0;
@@ -123,6 +164,7 @@ int ch375_uart_read_u16_timeout(const struct device *dev, uint16_t *data,
     USART_TypeDef *uart_instance;
     int64_t start_time = k_uptime_get();
     int64_t timeout_ms;
+    uint32_t attempts = 0;
     
     if (!data) {
         return -EINVAL;
@@ -136,22 +178,45 @@ int ch375_uart_read_u16_timeout(const struct device *dev, uint16_t *data,
         timeout_ms = timeout.ticks * 1000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC;
     }
     
-    /* Get USART instance */
     uart_instance = get_uart_instance(dev);
     if (!uart_instance) {
         return -ENOTSUP;
     }
     
     /* Wait for RX data */
-    while (!LL_USART_IsActiveFlag_RXNE(uart_instance)) {
+    while (!(uart_instance->SR & USART_SR_RXNE)) {
         if ((k_uptime_get() - start_time) >= timeout_ms) {
+            LOG_ERR("RX timeout after %lld ms (attempts=%u, SR=0x%08X)", 
+                   (k_uptime_get() - start_time), attempts, uart_instance->SR);
             return -ETIMEDOUT;
         }
-        k_yield();
+        
+        attempts++;
+        
+        /* Check for errors */
+        if (uart_instance->SR & USART_SR_ORE) {
+            LOG_ERR("Overrun error");
+            /* Clear by reading SR then DR */
+            (void)uart_instance->SR;
+            (void)uart_instance->DR;
+        }
+        if (uart_instance->SR & USART_SR_FE) {
+            LOG_ERR("Framing error");
+            (void)uart_instance->DR;  // Clear by reading DR
+        }
+        if (uart_instance->SR & USART_SR_NE) {
+            LOG_ERR("Noise error");
+            (void)uart_instance->DR;  // Clear by reading DR
+        }
+        
+        k_busy_wait(10);
     }
     
     /* Read 9-bit data */
-    *data = LL_USART_ReceiveData9(uart_instance);
+    *data = uart_instance->DR & 0x01FF;
+    
+    LOG_DBG("RX success after %u attempts, took %lld ms, data=0x%04X", 
+           attempts, (k_uptime_get() - start_time), *data);
     
     return 0;
 }
