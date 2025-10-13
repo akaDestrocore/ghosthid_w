@@ -9,6 +9,8 @@
 
 #include <stm32f4xx_ll_usart.h>
 #include <stm32f4xx_ll_bus.h>
+#include <stm32f4xx_ll_rcc.h>
+#include <stm32f4xx_ll_utils.h>
 
 #include "ch375/ch375.h"
 #include "ch375/ch375_uart.h"
@@ -23,6 +25,42 @@ typedef struct {
 } ch375_hw_context_t;
 
 static USART_TypeDef *get_uart_instance(const struct device *dev);
+
+/* Helper: compute APB clock for a given USART instance.
+ * Uses SystemCoreClock and RCC->CFGR prescalers (STM32F4).
+ */
+static uint32_t get_uart_pclk(USART_TypeDef *uart_instance)
+{
+    uint32_t hclk = SystemCoreClock;
+    uint32_t presc_val;
+    uint32_t div = 1;
+
+    if (uart_instance == USART1 || uart_instance == USART6) {
+        /* USART on APB2 */
+        presc_val = LL_RCC_GetAPB2Prescaler();
+        switch (presc_val) {
+        case LL_RCC_APB2_DIV_1: div = 1; break;
+        case LL_RCC_APB2_DIV_2: div = 2; break;
+        case LL_RCC_APB2_DIV_4: div = 4; break;
+        case LL_RCC_APB2_DIV_8: div = 8; break;
+        case LL_RCC_APB2_DIV_16: div = 16; break;
+        default: div = 1; break;
+        }
+    } else {
+        /* USART on APB1 */
+        presc_val = LL_RCC_GetAPB1Prescaler();
+        switch (presc_val) {
+        case LL_RCC_APB1_DIV_1:  div = 1; break;
+        case LL_RCC_APB1_DIV_2:  div = 2; break;
+        case LL_RCC_APB1_DIV_4:  div = 4; break;
+        case LL_RCC_APB1_DIV_8:  div = 8; break;
+        case LL_RCC_APB1_DIV_16: div = 16; break;
+        default: div = 1; break;
+        }
+    }
+
+    return hclk / div;
+}
 
 /* Configure UART for 9-bit mode */
 int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
@@ -67,16 +105,11 @@ int ch375_uart_configure_9bit(const struct device *dev, uint32_t baudrate)
     uart_instance->CR3 = 0;
     
     /* Set baud rate */
-    uint32_t apb_clock;
-    if (uart_instance == USART2 || uart_instance == USART3 || uart_instance == UART4) {
-        apb_clock = SystemCoreClock / 4;
-    } else {
-        apb_clock = SystemCoreClock / 2;
-    }
-    
+    uint32_t apb_clock = get_uart_pclk(uart_instance);
     uint32_t usartdiv = (apb_clock + (baudrate / 2)) / baudrate;
     uart_instance->BRR = usartdiv;
     
+    LOG_INF("SystemCoreClock=%u, APB clock=%u", SystemCoreClock, apb_clock);
     LOG_INF("APB clock: %u Hz, BRR value: 0x%04X", apb_clock, usartdiv);
     
     /* Enable UART */
@@ -140,7 +173,7 @@ int ch375_uart_write_u16_timeout(const struct device *dev, uint16_t data,
     } else if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
         timeout_ms = 0;
     } else {
-        timeout_ms = timeout.ticks * 1000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC;
+        timeout_ms = k_ticks_to_ms_floor64(timeout.ticks);
     }
     
     uart_instance = get_uart_instance(dev);
@@ -192,7 +225,7 @@ int ch375_uart_read_u16_timeout(const struct device *dev, uint16_t *data,
     } else if (K_TIMEOUT_EQ(timeout, K_NO_WAIT)) {
         timeout_ms = 0;
     } else {
-        timeout_ms = timeout.ticks * 1000 / CONFIG_SYS_CLOCK_TICKS_PER_SEC;
+        timeout_ms = k_ticks_to_ms_floor64(timeout.ticks);
     }
     
     uart_instance = get_uart_instance(dev);
@@ -319,12 +352,16 @@ static int ch375_read_data_cb(struct ch375_context *ctx, uint8_t *data)
 static int ch375_query_int_cb(struct ch375_context *ctx)
 {
     ch375_hw_context_t *hw = (ch375_hw_context_t *)ch375_get_priv(ctx);
-    
+    int val;
+
     if (!device_is_ready(hw->int_gpio.port)) {
         return 0;
     }
-    
-    return gpio_pin_get_dt(&hw->int_gpio) == 0 ? 1 : 0;
+
+    val = gpio_pin_get_dt(&hw->int_gpio);
+    LOG_DBG("%s: INT raw gpio value=%d (dt_flags=0x%04X)", hw->name, val, hw->int_gpio.dt_flags);
+    /* return 1 when line indicates "INT active" — adjust if your wiring is inverted */
+    return (val == 0) ? 1 : 0; /* keep previous behavior but we logged raw value */
 }
 
 int ch375_hw_init(const char *name,
@@ -374,7 +411,7 @@ int ch375_hw_init(const char *name,
         return -ENODEV;
     }
     
-    ret = gpio_pin_configure_dt(&int_gpio, GPIO_INPUT);
+    ret = gpio_pin_configure_dt(&int_gpio, GPIO_INPUT | int_gpio.dt_flags);
     if (ret < 0) {
         LOG_ERR("%s: Failed to configure INT GPIO: %d", name, ret);
         k_free(hw);

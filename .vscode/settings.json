@@ -1,5 +1,8 @@
 {
     "files.associations": {
-        "ch375_host.h": "c"
+        "ch375_host.h": "c",
+        "composite_hid.h": "c",
+        "hid_keyboard.h": "c",
+        "stdint.h": "c"
     }
 }

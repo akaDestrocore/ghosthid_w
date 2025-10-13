@@ -125,8 +125,10 @@ int hid_keyboard_get_key(struct hid_keyboard *keyboard, uint32_t key_code,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&keyboard->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(keyboard->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&keyboard->hid_dev->report_lock);
         return ret;
     }
     
@@ -141,6 +143,7 @@ int hid_keyboard_get_key(struct hid_keyboard *keyboard, uint32_t key_code,
         }
     }
     
+    k_mutex_unlock(&keyboard->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -156,8 +159,10 @@ int hid_keyboard_set_key(struct hid_keyboard *keyboard, uint32_t key_code,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&keyboard->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(keyboard->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&keyboard->hid_dev->report_lock);
         return ret;
     }
     
@@ -189,6 +194,7 @@ int hid_keyboard_set_key(struct hid_keyboard *keyboard, uint32_t key_code,
         }
     }
     
+    k_mutex_unlock(&keyboard->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -209,14 +215,17 @@ int hid_keyboard_get_modifier(struct hid_keyboard *keyboard, uint32_t modifier,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&keyboard->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(keyboard->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&keyboard->hid_dev->report_lock);
         return ret;
     }
     
     modifier_field = report_buf + keyboard->modifier.report_buf_off;
     *value = (*modifier_field & (1 << (modifier & 0x07))) ? 1 : 0;
     
+    k_mutex_unlock(&keyboard->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -237,8 +246,10 @@ int hid_keyboard_set_modifier(struct hid_keyboard *keyboard, uint32_t modifier,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&keyboard->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(keyboard->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&keyboard->hid_dev->report_lock);
         return ret;
     }
     
@@ -250,5 +261,6 @@ int hid_keyboard_set_modifier(struct hid_keyboard *keyboard, uint32_t modifier,
         *modifier_field &= ~(1 << (modifier & 0x07));
     }
     
+    k_mutex_unlock(&keyboard->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }

@@ -109,6 +109,8 @@ int ch375_host_control_transfer(struct usb_device *udev,
     if (wLength > 0) {
         while (total_received < wLength) {
             uint8_t packet_len = 0;
+            uint8_t remaining = wLength - total_received;
+            uint8_t max_read = remaining > udev->ep0_maxpack ? udev->ep0_maxpack : remaining;
             
             if (SETUP_IN(request_type)) {
                 /* IN transfer */
@@ -126,9 +128,9 @@ int ch375_host_control_transfer(struct usb_device *udev,
                     goto status_error;
                 }
                 
-                /* Read whatever the CH375 has for us */
+                /* Read whatever the CH375 has for us - ONLY up to max_read bytes */
                 ret = ch375_read_block_data(ctx, data + total_received, 
-                                          wLength - total_received, &packet_len);
+                                          max_read, &packet_len);
                 if (ret != CH375_SUCCESS) {
                     LOG_ERR("Read data failed: %d", ret);
                     return CH375_HOST_ERROR;
@@ -141,9 +143,9 @@ int ch375_host_control_transfer(struct usb_device *udev,
                 tog ^= 1;
                 
                 /* Short packet ends DATA stage */
-                if (packet_len < udev->ep0_maxpack) {
+                if (packet_len < max_read) {
                     LOG_DBG("Short packet (%d < %d bytes), DATA stage complete", 
-                           packet_len, udev->ep0_maxpack);
+                           packet_len, max_read);
                     break;
                 }
                 

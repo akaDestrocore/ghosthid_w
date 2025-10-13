@@ -54,6 +54,9 @@ struct usbhid_device {
     uint8_t interface_num;
     uint8_t ep_in;
     
+    uint8_t *report_buffer_base;   /* pointer returned by k_malloc (free this) */
+    struct k_mutex report_lock;    /* protects report_buffer and related fields */
+
     /* HID descriptor and report */
     struct usb_hid_descriptor *hid_desc;
     uint8_t *raw_hid_report_desc;

@@ -41,14 +41,12 @@ LOG_MODULE_REGISTER(hid_mouse, LOG_LEVEL_INF);
 
 void usbhid_free_report_buffer(struct usbhid_device *dev)
 {
-    if (!dev) {
-        return;
+    if (!dev) return;
+    if (dev->report_buffer_base) {
+        k_free(dev->report_buffer_base);
+        dev->report_buffer_base = NULL;
     }
-    
-    if (dev->report_buffer) {
-        k_free(dev->report_buffer);
-        dev->report_buffer = NULL;
-    }
+    dev->report_buffer = NULL;
     dev->report_length = 0;
     dev->report_buffer_length = 0;
     dev->report_buffer_last_offset = 0;
@@ -56,33 +54,27 @@ void usbhid_free_report_buffer(struct usbhid_device *dev)
 
 int usbhid_alloc_report_buffer(struct usbhid_device *dev, uint32_t length)
 {
-    uint8_t *buf;
+    uint8_t *raw;
     uint32_t buf_len;
-    
-    if (!dev) {
-        LOG_ERR("Invalid device");
-        return USBHID_PARAM_INVALID;
-    }
-    
-    if (dev->report_buffer) {
-        LOG_ERR("Report buffer already allocated");
-        return USBHID_ERROR;
-    }
-    
-    buf_len = length * 2;  /* Double buffer for ping-pong */
-    buf = k_malloc(buf_len);
-    if (!buf) {
-        LOG_ERR("Failed to allocate report buffer (size=%d)", buf_len);
-        return USBHID_ALLOC_FAILED;
-    }
-    
-    memset(buf, 0, buf_len);
-    
-    dev->report_length = length;
-    dev->report_buffer = buf;
+
+    if (!dev) return USBHID_PARAM_INVALID;
+    if (dev->report_buffer) return USBHID_ERROR;
+
+    buf_len = length * 2;
+    raw = k_malloc(buf_len + 4);
+    if (!raw) return USBHID_ALLOC_FAILED;
+    memset(raw, 0, buf_len + 4);
+
+    /* align to 4 */
+    uintptr_t addr = (uintptr_t)raw;
+    uintptr_t aligned = (addr + 3) & ~((uintptr_t)3);
+
+    dev->report_buffer_base = raw;
+    dev->report_buffer = (uint8_t *)aligned;
     dev->report_buffer_length = buf_len;
+    dev->report_length = length;
     dev->report_buffer_last_offset = 0;
-    
+
     return USBHID_SUCCESS;
 }
 
@@ -126,8 +118,11 @@ int usbhid_get_report_buffer(struct usbhid_device *dev, uint8_t **buffer,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&dev->report_lock, K_FOREVER);
+
     buf = get_report_buffer(dev, is_last);
     if (!buf) {
+        k_mutex_unlock(&dev->report_lock);
         LOG_ERR("Report buffer not allocated");
         return USBHID_BUFFER_NOT_ALLOC;
     }
@@ -147,29 +142,35 @@ int usbhid_fetch_report(struct usbhid_device *dev)
     uint8_t *last_report_buffer;
     int actual_len = 0;
     int ret;
-    
+
     if (!dev) {
         return USBHID_PARAM_INVALID;
     }
-    
+
+    k_mutex_lock(&dev->report_lock, K_FOREVER);
+
     last_report_buffer = get_report_buffer(dev, 1);
     if (!last_report_buffer) {
+        k_mutex_unlock(&dev->report_lock);
         LOG_ERR("Report buffer not allocated");
         return USBHID_BUFFER_NOT_ALLOC;
     }
-    
+
+    /* perform read while holding lock so nobody mutates buffer concurrently */
     ret = usbhid_read(dev, last_report_buffer, dev->report_length, &actual_len);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&dev->report_lock);
         return ret;
     }
-    
+
     /* Switch buffer */
     if (dev->report_buffer_last_offset) {
         dev->report_buffer_last_offset = 0;
     } else {
         dev->report_buffer_last_offset = dev->report_length;
     }
-    
+
+    k_mutex_unlock(&dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -325,7 +326,14 @@ int usbhid_open(struct usb_device *udev, uint8_t interface_num,
     }
     
     memset(dev, 0, sizeof(struct usbhid_device));
-    
+    k_mutex_init(&dev->report_lock);
+    dev->report_buffer_base = NULL;
+    dev->report_buffer = NULL;
+    dev->report_buffer_length = 0;
+    dev->report_length = 0;
+    dev->report_buffer_last_offset = 0;
+
+
     set_idle(udev, interface_num, 0, 0);
     LOG_INF("Set idle done");
     
@@ -423,8 +431,10 @@ int hid_mouse_get_button(struct hid_mouse *mouse, uint32_t button_num,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&mouse->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(mouse->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&mouse->hid_dev->report_lock);
         return ret;
     }
     
@@ -432,6 +442,7 @@ int hid_mouse_get_button(struct hid_mouse *mouse, uint32_t button_num,
     field_buf = report_buf + desc->report_buf_off;
     *value = (field_buf[byte_off] & (0x01 << bit_off)) ? 1 : 0;
     
+    k_mutex_unlock(&mouse->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -454,8 +465,10 @@ int hid_mouse_set_button(struct hid_mouse *mouse, uint32_t button_num,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&mouse->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(mouse->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&mouse->hid_dev->report_lock);
         return ret;
     }
     
@@ -468,6 +481,7 @@ int hid_mouse_set_button(struct hid_mouse *mouse, uint32_t button_num,
         field_buf[byte_off] &= ~(0x01 << bit_off);
     }
     
+    k_mutex_unlock(&mouse->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -489,8 +503,10 @@ int hid_mouse_get_orientation(struct hid_mouse *mouse, uint32_t axis_num,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&mouse->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(mouse->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&mouse->hid_dev->report_lock);
         return ret;
     }
     
@@ -513,6 +529,7 @@ int hid_mouse_get_orientation(struct hid_mouse *mouse, uint32_t axis_num,
         return USBHID_ERROR;
     }
     
+    k_mutex_unlock(&mouse->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 
@@ -534,8 +551,10 @@ int hid_mouse_set_orientation(struct hid_mouse *mouse, uint32_t axis_num,
         return USBHID_PARAM_INVALID;
     }
     
+    k_mutex_lock(&mouse->hid_dev->report_lock, K_FOREVER);
     ret = usbhid_get_report_buffer(mouse->hid_dev, &report_buf, NULL, is_last);
     if (ret != USBHID_SUCCESS) {
+        k_mutex_unlock(&mouse->hid_dev->report_lock);
         return ret;
     }
     
@@ -558,6 +577,7 @@ int hid_mouse_set_orientation(struct hid_mouse *mouse, uint32_t axis_num,
         return USBHID_ERROR;
     }
     
+    k_mutex_unlock(&mouse->hid_dev->report_lock);
     return USBHID_SUCCESS;
 }
 

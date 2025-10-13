@@ -5,6 +5,7 @@
 #include <zephyr/usb/class/usb_hid.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/atomic.h>
 #include <string.h>
 
 #include "usb/composite_hid.h"
@@ -14,6 +15,13 @@ LOG_MODULE_REGISTER(composite_hid, LOG_LEVEL_INF);
 #define COMPOSITE_HID_MAX_INTERFACES 2
 #define HID_EP_SIZE 8
 #define HID_REPORT_MAX_SIZE 256
+static struct k_work send_report_work;
+static uint8_t send_report_buf[HID_REPORT_MAX_SIZE];
+static size_t  send_report_len;
+static uint8_t send_report_iface;
+bool composite_hid_usb_configured = false;
+
+static atomic_t g_usb_configured = ATOMIC_INIT(0);
 
 struct composite_hid_interface {
     uint8_t *report_desc;
@@ -40,6 +48,44 @@ struct hid_descriptor {
     uint8_t bClassDescriptorType;
     uint16_t wClassDescriptorLength;
 } __packed;
+
+void composite_hid_set_usb_configured(bool v)
+{
+    /* update both atomic and the visible boolean */
+    atomic_set(&g_usb_configured, v ? 1 : 0);
+    composite_hid_usb_configured = v;
+}
+
+
+bool composite_hid_is_configured(void)
+{
+    return (bool)atomic_get(&g_usb_configured);
+}
+
+static void dump_buf(const uint8_t *buf, size_t len)
+{
+    char s[64];
+    int p = 0;
+    for (size_t i = 0; i < len && p + 3 < sizeof(s); i++) {
+        p += snprintk(s + p, sizeof(s) - p, "%02x ", buf[i]);
+    }
+    LOG_DBG("report: %s", s);
+}
+
+static void send_report_work_handler(struct k_work *work)
+{
+    int ret;
+    /* This runs in thread context — safe to call USB stack functions */
+    ret = hid_device_send_report(send_report_iface, send_report_buf, send_report_len);
+    if (ret) {
+        LOG_ERR("hid_device_send_report failed: %d", ret);
+    }
+}
+
+static inline bool usb_is_configured(void)
+{
+    return (bool)atomic_get(&g_usb_configured);
+}
 
 /* Build configuration descriptor */
 static int build_config_descriptor(void)
@@ -159,6 +205,8 @@ int composite_hid_init(void)
 {
     int ret;
     
+    k_work_init(&send_report_work, send_report_work_handler);
+
     if (interface_count == 0) {
         LOG_ERR("No interfaces registered");
         return -EINVAL;
@@ -179,23 +227,43 @@ int hid_device_send_report(uint8_t interface_num, uint8_t *report, size_t len)
 {
     struct composite_hid_interface *iface;
     int ret;
-    
+
     if (interface_num >= interface_count) {
         return -EINVAL;
     }
-    
+
     iface = &interfaces[interface_num];
-    if (!iface->configured) {
+    if (!iface->configured) { /* means "registered" */
         return -ENODEV;
     }
-    
-    /* Send HID report via USB */
+
+    if (!usb_is_configured()) {
+        LOG_WRN("USB not configured; skipping HID send on iface %d", interface_num);
+        return -EAGAIN;
+    }
+
+    if (iface->max_packet == 0) {
+        LOG_ERR("Interface %d has max_packet == 0; aborting send", interface_num);
+        return -EINVAL;
+    }
+
+    if (len > iface->max_packet) {
+        LOG_WRN("Truncating report len %zu to max_packet %u", len, iface->max_packet);
+        len = iface->max_packet;
+    }
+
+    LOG_DBG("hid_device_send_report iface=%d len=%zu usb_config=%d max_packet=%u",
+        interface_num, len, usb_is_configured(), iface->max_packet);
+
+    dump_buf(report, len);
     ret = usb_write(iface->ep_in, report, len, NULL);
     if (ret) {
         LOG_ERR("Failed to send HID report on interface %d: %d", interface_num, ret);
         return ret;
     }
-    
+
+    LOG_DBG("usb_write -> %d (sent %zu bytes)", ret, len);
+
     return 0;
 }
 

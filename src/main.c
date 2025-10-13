@@ -13,12 +13,19 @@
 #include "ch375/ch375_uart.h"
 #include "hid/hid_mouse.h"
 #include "hid/hid_keyboard.h"
+#include "hid/async_report.h"
 #include "usb/composite_hid.h"
 #include "auto_gun_press.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
+/************************************************* */
+uint8_t mouse_report[4] = {0x00, 5, 0, 0}; // buttons, x, y, wheel
+/************************************************* */
+
 #define CH375_MODULE_NUM 2
+
+void composite_hid_set_usb_configured(bool configured);
 
 /* Device context structure */
 typedef struct {
@@ -95,6 +102,20 @@ static int init_device_input_dt(device_input_t *devin,
     return 0;
 }
 
+static void send_test_mouse_move(uint8_t iface)
+{
+    /* Typical boot-mouse: [buttons, dx, dy] (signed 8-bit deltas) */
+    const int8_t dx = 10; /* move right */
+    const int8_t dy = 0;
+    uint8_t rpt[3];
+    rpt[0] = 0x00;            /* buttons */
+    rpt[1] = (uint8_t)dx;     /* X */
+    rpt[2] = (uint8_t)dy;     /* Y */
+
+    int rc = hid_device_send_report(iface, rpt, sizeof(rpt));
+    LOG_INF("test mouse send rc=%d", rc);
+}
+
 /* Process mouse HID reports */
 static int handle_mouse(struct hid_mouse *mouse, uint8_t interface_num)
 {
@@ -111,6 +132,7 @@ static int handle_mouse(struct hid_mouse *mouse, uint8_t interface_num)
         need_send = 1;
     }
     
+    k_mutex_lock(&mouse->hid_dev->report_lock, K_FOREVER);
     usbhid_get_report_buffer(hiddev, &report_buf, NULL, USBHID_NOW);
     
     /* Check left mouse button for auto gun press */
@@ -146,10 +168,16 @@ static int handle_mouse(struct hid_mouse *mouse, uint8_t interface_num)
     }
     
     if (need_send) {
-        /* Send HID report via USB device */
-        hid_device_send_report(interface_num, report_buf, hiddev->report_length);
+        int rc = composite_hid_send_report_async(interface_num, report_buf, hiddev->report_length);
+        if (rc == -EAGAIN) {
+            /* USB not ready yet; skip this report */
+            LOG_DBG("USB not ready for send (iface %d), skipping", interface_num);
+        } else if (rc != 0) {
+            LOG_ERR("hid_device_send_report failed: %d", rc);
+        }
     }
     
+    k_mutex_unlock(&mouse->hid_dev->report_lock);
     return 0;
 }
 
@@ -166,6 +194,7 @@ static int handle_keyboard(struct hid_keyboard *keyboard, uint8_t interface_num)
         return ret;
     }
     
+    k_mutex_lock(&keyboard->hid_dev->report_lock, K_FOREVER);
     usbhid_get_report_buffer(hiddev, &report_buf, NULL, USBHID_NOW);
     
     /* Check for control keys */
@@ -206,8 +235,9 @@ static int handle_keyboard(struct hid_keyboard *keyboard, uint8_t interface_num)
     }
     
     /* Send report */
-    hid_device_send_report(interface_num, report_buf, hiddev->report_length);
+    composite_hid_send_report_async(interface_num, report_buf, hiddev->report_length);
     
+    k_mutex_unlock(&keyboard->hid_dev->report_lock);
     return 0;
 }
 
@@ -345,6 +375,8 @@ static void open_device_out(void)
         if (status != 0) {
             LOG_ERR("Failed to register HID interface %d", i);
         }
+        LOG_INF("Register iface %d: report_desc_len=%d, max_packet=%d",
+        i, hiddev->raw_hid_report_desc_len, 8);
     }
     
     status = composite_hid_init();
@@ -403,6 +435,27 @@ static void close_all_devices(void)
     }
     
     composite_hid_cleanup();
+}
+
+static void usb_status_cb(enum usb_dc_status_code status, const uint8_t *param)
+{
+    switch (status) {
+    case USB_DC_CONFIGURED:
+        LOG_INF("USB configured by host");
+        composite_hid_set_usb_configured(true);
+        composite_hid_send_report_async(0, mouse_report, sizeof(mouse_report));
+        break;
+    case USB_DC_SUSPEND:
+        LOG_INF("USB suspended");
+        /* fallthrough */
+    case USB_DC_RESET:
+    case USB_DC_DISCONNECTED:
+        LOG_INF("USB not configured / disconnected");
+        composite_hid_set_usb_configured(false);
+        break;
+    default:
+        break;
+    }
 }
 
 int main(void)
@@ -509,7 +562,7 @@ int main(void)
         open_device_out();
         
         /* Enable USB device */
-        ret = usb_enable(NULL);
+        ret = usb_enable(usb_status_cb);
         if (ret) {
             LOG_ERR("Failed to enable USB device: %d", ret);
             close_all_devices();

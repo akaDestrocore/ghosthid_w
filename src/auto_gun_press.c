@@ -160,7 +160,7 @@ static void free_fixed_data(struct agp_context *ctx)
 
 static int generate_fixed_data(struct agp_context *ctx)
 {
-    struct agp_collect *coll = ctx->collect;
+    struct agp_collect *coll;
     int raw_idx = 0;
     int idx = 0;
     int i, j;
@@ -169,13 +169,44 @@ static int generate_fixed_data(struct agp_context *ctx)
     int32_t fixx, fixy, fixts;
     float sumx = 0, sumy = 0, sumts = 0;
     float sumxo = 0, sumyo = 0, sumtso = 0;
-    
-    ctx->arr_length = coll->multiple * coll->len / 3;
-    
+
+    if (!ctx) {
+        return -EINVAL;
+    }
+    coll = ctx->collect;
+    if (!coll) {
+        LOG_ERR("No collect selected");
+        return -EINVAL;
+    }
+
+    if (coll->len < 3) {
+        LOG_ERR("Collect data too small: len=%d", coll->len);
+        return -EINVAL;
+    }
+
+    if (coll->multiple <= 0) {
+        LOG_ERR("Invalid collect multiple: %d", coll->multiple);
+        return -EINVAL;
+    }
+
+    if (ctx->sensitive == 0.0f) {
+        LOG_ERR("Invalid sensitivity (zero) — aborting");
+        return -EINVAL;
+    }
+
+    int samples = coll->len / 3;
+    ctx->arr_length = coll->multiple * samples;  /* each sample expands into `multiple` items */
+
+    if (ctx->arr_length <= 0) {
+        LOG_ERR("Computed arr_length is zero: samples=%d, multiple=%d",
+                samples, coll->multiple);
+        return -EINVAL;
+    }
+
     ctx->arr_x = k_malloc(sizeof(int32_t) * ctx->arr_length);
     ctx->arr_y = k_malloc(sizeof(int32_t) * ctx->arr_length);
     ctx->arr_ts = k_malloc(sizeof(int32_t) * ctx->arr_length);
-    
+
     if (!ctx->arr_x || !ctx->arr_y || !ctx->arr_ts) {
         LOG_ERR("Failed to allocate fixed data arrays (len=%d)", ctx->arr_length);
         free_fixed_data(ctx);
@@ -191,6 +222,9 @@ static int generate_fixed_data(struct agp_context *ctx)
         sx = (int32_t)floorf(x / coll->multiple);
         sy = (int32_t)floorf(y / coll->multiple);
         sts = (int32_t)floorf(ts / coll->multiple);
+        if (sts <= 0) {
+            sts = 1;
+        }
         
         sumx += sx * coll->multiple;
         sumy += sy * coll->multiple;
@@ -276,12 +310,15 @@ int agp_restart(struct agp_context *ctx)
 
 int agp_get_data(struct agp_context *ctx, struct agp_data *data)
 {
-    if (!ctx || !data) {
-        return -EINVAL;
-    }
-    
+    if (!ctx || !data) return -EINVAL;
+
     k_mutex_lock(&ctx->lock, K_FOREVER);
-    
+
+    if (!ctx->arr_ts || ctx->arr_length <= 0) {
+        k_mutex_unlock(&ctx->lock);
+        return -1;
+    }
+
     if (ctx->arr_index >= ctx->arr_length) {
         k_mutex_unlock(&ctx->lock);
         return -1;
@@ -361,7 +398,13 @@ int agp_open(struct agp_context **ctx)
     new_ctx->coefficient = DEFAULT_COEFFICIENT;
     new_ctx->sensitive = DEFAULT_SENSITIVE;
     
-    agp_set_collect(new_ctx, AGP_COLLECT_IDX_AK47);
+    int ret = agp_set_collect(new_ctx, AGP_COLLECT_IDX_AK47);
+    if (ret < 0) {
+        LOG_ERR("Failed to set collect at open: %d", ret);
+        free_fixed_data(new_ctx);
+        k_free(new_ctx);
+        return ret;
+    }
     agp_restart(new_ctx);
     
     *ctx = new_ctx;

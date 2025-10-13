@@ -9,6 +9,10 @@
 /* Maximum number of HID interfaces */
 #define COMPOSITE_HID_MAX_INTERFACES 2
 
+
+/* Maximum local copy size for async HID reports */
+#define HID_REPORT_MAX_SIZE 256
+
 /* USB HID Class definitions */
 #define USB_BCC_HID             0x03
 #define USB_DESC_HID            0x21
@@ -44,4 +48,6 @@ int hid_device_send_report(uint8_t interface_num, uint8_t *report, size_t len);
 
 void composite_hid_cleanup(void);
 
+void composite_hid_set_usb_configured(bool v);
+bool composite_hid_is_configured(void);
 #endif /* USB_COMPOSITE_HID_H */

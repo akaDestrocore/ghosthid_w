@@ -596,6 +596,7 @@ int ch375_send_token(struct ch375_context *ctx, uint8_t ep, uint8_t tog,
     
     k_mutex_unlock(&ctx->lock);
 
+    k_busy_wait(50);
     if (pid == CH375_USB_PID_IN) {
         k_busy_wait(500);  // 500us delay for IN tokens
     }

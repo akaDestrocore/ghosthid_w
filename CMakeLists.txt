@@ -12,6 +12,7 @@ target_sources(app PRIVATE
     src/hid/hid_parser.c
     src/hid/hid_mouse.c
     src/hid/hid_keyboard.c
+    src/hid/async_report.c
     src/usb/composite_hid.c
     src/auto_gun_press.c
 )
