@@ -58,9 +58,8 @@ int ch375_host_control_transfer(struct usb_device *udev,
 {
     struct ch375_context *ctx;
     uint8_t setup_buf[CONTROL_SETUP_SIZE];
-    int residue_len = wLength;
+    int total_received = 0;
     uint8_t tog = 0;
-    int offset = 0;
     uint8_t status;
     int ret;
     
@@ -82,7 +81,7 @@ int ch375_host_control_transfer(struct usb_device *udev,
         return CH375_HOST_ERROR;
     }
     
-    /* SETUP stage - always uses tog=0 */
+    /* === SETUP STAGE === */
     LOG_DBG("Sending SETUP ...");
     fill_control_setup(setup_buf, request_type, bRequest, wValue, wIndex, wLength);
     
@@ -103,95 +102,99 @@ int ch375_host_control_transfer(struct usb_device *udev,
         goto status_error;
     }
     
-    tog = tog ^ 1;
+    tog = 1;  /* DATA stage starts with DATA1 */
     LOG_DBG("SETUP succeeded");
     
-    //* DATA stage - tog starts at 1 (DATA1) */
-    while (residue_len) {
-        uint8_t len = residue_len > udev->ep0_maxpack ? udev->ep0_maxpack : residue_len;
-        uint8_t actual_len = 0;
-        
-        if (SETUP_IN(request_type)) {
-            /* IN transfer */
-            LOG_DBG("Sending IN token (tog=%d, remaining=%d)", tog, residue_len);
+    /* === DATA STAGE === */
+    if (wLength > 0) {
+        while (total_received < wLength) {
+            uint8_t packet_len = 0;
             
-            ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_IN, &status);
-            if (ret != CH375_SUCCESS) {
-                LOG_ERR("Send IN token failed: %d", ret);
-                return CH375_HOST_ERROR;
+            if (SETUP_IN(request_type)) {
+                /* IN transfer */
+                LOG_DBG("Sending IN token (tog=%d, received=%d/%d)", 
+                       tog, total_received, wLength);
+                
+                ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_IN, &status);
+                if (ret != CH375_SUCCESS) {
+                    LOG_ERR("Send IN token failed: %d", ret);
+                    return CH375_HOST_ERROR;
+                }
+                
+                if (status != CH375_USB_INT_SUCCESS) {
+                    LOG_ERR("IN token failed, status: 0x%02X", status);
+                    goto status_error;
+                }
+                
+                /* Read whatever the CH375 has for us */
+                ret = ch375_read_block_data(ctx, data + total_received, 
+                                          wLength - total_received, &packet_len);
+                if (ret != CH375_SUCCESS) {
+                    LOG_ERR("Read data failed: %d", ret);
+                    return CH375_HOST_ERROR;
+                }
+                
+                LOG_DBG("Received %d bytes (total=%d/%d)", 
+                       packet_len, total_received + packet_len, wLength);
+                
+                total_received += packet_len;
+                tog ^= 1;
+                
+                /* Short packet ends DATA stage */
+                if (packet_len < udev->ep0_maxpack) {
+                    LOG_DBG("Short packet (%d < %d bytes), DATA stage complete", 
+                           packet_len, udev->ep0_maxpack);
+                    break;
+                }
+                
+            } else {
+                /* OUT transfer */
+                uint8_t to_send = wLength - total_received;
+                if (to_send > udev->ep0_maxpack) {
+                    to_send = udev->ep0_maxpack;
+                }
+                
+                ret = ch375_write_block_data(ctx, data + total_received, to_send);
+                if (ret != CH375_SUCCESS) {
+                    LOG_ERR("Write data failed: %d", ret);
+                    return CH375_HOST_ERROR;
+                }
+                
+                ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_OUT, &status);
+                if (ret != CH375_SUCCESS) {
+                    LOG_ERR("Send OUT token failed: %d", ret);
+                    return CH375_HOST_ERROR;
+                }
+                
+                if (status != CH375_USB_INT_SUCCESS) {
+                    LOG_ERR("OUT token failed, status: 0x%02X", status);
+                    goto status_error;
+                }
+                
+                total_received += to_send;
+                tog ^= 1;
             }
             
-            if (status != CH375_USB_INT_SUCCESS) {
-                LOG_ERR("IN token failed, status: 0x%02X", status);
-                goto status_error;
+            /* Small delay between packets */
+            if (total_received < wLength) {
+                k_busy_wait(100);
             }
-            
-            ret = ch375_read_block_data(ctx, data + offset, len, &actual_len);
-            if (ret != CH375_SUCCESS) {
-                LOG_ERR("Read data failed: %d", ret);
-                return CH375_HOST_ERROR;
-            }
-            
-            LOG_DBG("IN token succeeded, read %d bytes", actual_len);
-            
-            residue_len -= actual_len;
-            offset += actual_len;
-            
-            /* Toggle for next packet */
-            tog = tog ^ 1;
-            
-            /* Short packet ends the DATA stage */
-            if (actual_len < udev->ep0_maxpack) {
-                LOG_DBG("Short packet received, DATA stage complete");
-                break;
-            }
-            
-            /* Small delay between packets for device to prepare next DATA packet */
-            k_busy_wait(100);  /* 100us delay */
-        } else {
-            /* OUT transfer */
-            ret = ch375_write_block_data(ctx, data + offset, len);
-            if (ret != CH375_SUCCESS) {
-                LOG_ERR("Write data failed: %d", ret);
-                return CH375_HOST_ERROR;
-            }
-            
-            ret = ch375_send_token(ctx, 0, tog, CH375_USB_PID_OUT, &status);
-            if (ret != CH375_SUCCESS) {
-                LOG_ERR("Send OUT token failed: %d", ret);
-                return CH375_HOST_ERROR;
-            }
-            
-            if (status != CH375_USB_INT_SUCCESS) {
-                LOG_ERR("OUT token failed, status: 0x%02X", status);
-                goto status_error;
-            }
-            
-            /* Toggle AFTER success */
-            tog = tog ^ 1;
-            
-            residue_len -= len;
-            offset += len;
         }
     }
     
-    /* STATUS stage - always uses tog=1 (DATA1) */
+    /* === STATUS STAGE === */
     if (SETUP_IN(request_type)) {
-        /* IN control: STATUS is OUT with no data */
-        LOG_DBG("Sending STATUS OUT (tog=%d)", 1);
+        /* IN control: STATUS is OUT with zero data */
+        LOG_DBG("Sending STATUS OUT");
         
         uint8_t dummy[1] = {0};
-        LOG_DBG("About to write block data with len=0");
         ret = ch375_write_block_data(ctx, dummy, 0);
-        LOG_DBG("write_block_data returned: %d", ret);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Write status OUT failed: %d", ret);
             return CH375_HOST_ERROR;
         }
         
-        LOG_DBG("About to send OUT token with tog=1");
         ret = ch375_send_token(ctx, 0, 1, CH375_USB_PID_OUT, &status);
-        LOG_DBG("send_token returned: %d, status=0x%02X", ret, status);
         if (ret != CH375_SUCCESS) {
             LOG_ERR("Send status OUT token failed: %d", ret);
             return CH375_HOST_ERROR;
@@ -217,10 +220,11 @@ int ch375_host_control_transfer(struct usb_device *udev,
         }
     }
     
-    LOG_DBG("Control transfer completed, transferred %d bytes", offset);
+    LOG_DBG("Control transfer complete: %d bytes transferred (requested %d)", 
+           total_received, wLength);
     
     if (actual_length) {
-        *actual_length = offset;
+        *actual_length = total_received;
     }
     
     return CH375_HOST_SUCCESS;

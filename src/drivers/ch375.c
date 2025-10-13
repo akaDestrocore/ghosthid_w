@@ -109,21 +109,38 @@ int ch375_read_block_data(struct ch375_context *ctx, uint8_t *buf, uint8_t len,
         return CH375_WRITE_CMD_FAILED;
     }
     
+    /* First byte from CH375 is the length */
     ret = ch375_read_data(ctx, &data_len);
     if (ret != CH375_SUCCESS) {
         k_mutex_unlock(&ctx->lock);
         return CH375_READ_DATA_FAILED;
     }
     
+    LOG_DBG("CH375 reports %d bytes available", data_len);
+    
     residue_len = data_len;
     offset = 0;
     
+    /* CRITICAL: The CH375 sometimes reports more bytes than it actually has,
+     * especially for short packets at the end of a control transfer.
+     * We detect this by catching the timeout on read_data.
+     */
     while (residue_len > 0 && offset < len) {
         ret = ch375_read_data(ctx, &buf[offset]);
+        
+        if (ret == CH375_TIMEOUT) {
+            /* Timeout = no more data available (short packet) */
+            LOG_DBG("Short packet detected: read %d bytes (CH375 reported %d)", 
+                   offset, data_len);
+            break;
+        }
+        
         if (ret != CH375_SUCCESS) {
+            LOG_ERR("Read failed at offset %d: %d", offset, ret);
             k_mutex_unlock(&ctx->lock);
             return CH375_READ_DATA_FAILED;
         }
+        
         offset++;
         residue_len--;
     }
@@ -131,7 +148,7 @@ int ch375_read_block_data(struct ch375_context *ctx, uint8_t *buf, uint8_t len,
     *actual_len = offset;
     
     k_mutex_unlock(&ctx->lock);
-    LOG_DBG("Read block data: actual_len=%d", offset);
+    LOG_DBG("Read block data complete: actual_len=%d (reported=%d)", offset, data_len);
     
     return CH375_SUCCESS;
 }
@@ -578,6 +595,10 @@ int ch375_send_token(struct ch375_context *ctx, uint8_t ep, uint8_t tog,
     }
     
     k_mutex_unlock(&ctx->lock);
+
+    if (pid == CH375_USB_PID_IN) {
+        k_busy_wait(500);  // 500us delay for IN tokens
+    }
     
     /* Wait for interrupt */
     ret = ch375_wait_int(ctx, WAIT_INT_TIMEOUT_MS);
