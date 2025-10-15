@@ -3,6 +3,7 @@
         "ch375_host.h": "c",
         "composite_hid.h": "c",
         "hid_keyboard.h": "c",
-        "stdint.h": "c"
+        "stdint.h": "c",
+        "ch375.h": "c"
     }
 }

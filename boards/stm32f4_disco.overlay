@@ -5,7 +5,6 @@
     };
 };
 
-/* Configure UARTs for CH375 */
 &usart2 {
     pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
     pinctrl-names = "default";
@@ -20,34 +19,33 @@
     status = "okay";
 };
 
-/* Log UART */
 &uart4 {
     pinctrl-0 = <&uart4_tx_pc10 &uart4_rx_pa1>;
     pinctrl-names = "default";
     current-speed = <115200>;
     status = "okay";
+    label = "UART_4";
 };
 
-/* USB OTG FS for device mode */
 &usbotg_fs {
     status = "okay";
     pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
     pinctrl-names = "default";
 };
 
-/* GPIO ports */
-&gpioc {
-    status = "okay";
+&gpioc { 
+        label = "GPIOC";
+        status = "okay"; 
 };
-
-&gpioe {
-    status = "okay";
+&gpioe { 
+        label = "GPIOE";
+        status = "okay"; 
 };
-
-&gpioa {
-    status = "okay";
+&gpioa { 
+        label = "GPIOA";
+        status = "okay"; 
 };
-
-&gpiob {
-    status = "okay";
+&gpiob { 
+        label = "GPIOB";
+        status = "okay"; 
 };
