@@ -20,19 +20,33 @@ int composite_hid_send_report(uint8_t interface_idx, uint8_t *report, uint16_t l
         return -1;
     }
 
-    /* ensure USB device stack initialized */
-    if (&hUsbDeviceFS == NULL || hUsbDeviceFS.pData == NULL) {
-        LOG_ERR("USB device not initialized (call MX_USB_DEVICE_Init() first)");
+    /* Ensure USBD handle looks initialized */
+    if (hUsbDeviceFS.pData == NULL) {
+        LOG_ERR("USB device not initialized (pData == NULL) - abort TX");
+        return -2;
+    }
+
+    /* Ensure device is configured */
+    if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) {
+        LOG_WRN("USB device not configured yet (state=%d) - skip report", (int)hUsbDeviceFS.dev_state);
         return -2;
     }
 
     uint8_t ep = usbd_composite_hid.ep_addr[interface_idx];
-    LOG_DBG("TX report -> if=%u ep=0x%02X len=%u", interface_idx, ep, len);
+    /* sanity-check endpoint address */
+    if ((ep & 0x7F) >= 8) {
+        LOG_ERR("endpoint index out of range: 0x%02X", ep);
+        return -3;
+    }
 
+    LOG_DBG("composite_hid_send_report: TX report -> if=%u ep=0x%02X len=%u", interface_idx, ep, len);
+
+    /* perform transmit */
     USBD_StatusTypeDef st = USBD_LL_Transmit(&hUsbDeviceFS, ep, report, len);
     if (st != USBD_OK) {
         LOG_ERR("USBD_LL_Transmit failed: %d", (int)st);
-        return -3;
+        return -4;
     }
     return 0;
 }
+

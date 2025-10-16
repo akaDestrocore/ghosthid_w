@@ -466,19 +466,22 @@ static void prepare_usart_for_transfer_if_possible(ch375_adapter_priv_t *priv, u
     pclk1 = hclk / div;
 #endif
 
-    uint32_t expected_brr = compute_brr_from_pclk(pclk1, baud);
+    uint32_t expected_brr_9600 = compute_brr_from_pclk(pclk1, 9600);
+    uint32_t expected_brr_115200 = compute_brr_from_pclk(pclk1, 115200);
     VLOG_INF("Clock debug: SYSCLK=%lu Hz, PCLK1=%lu Hz, test_baud=%lu",
              (unsigned long)SystemCoreClock, (unsigned long)pclk1, (unsigned long)baud);
 
     /* Attempt a small retry loop to set M bit and BRR */
     for (int i = 0; i < MBIT_RETRY; ++i) {
         configure_usart_for_9bit(usart);
-        ensure_brr_and_mbit(usart, expected_brr);
-        /* verify M bit set */
-        if (usart->CR1 & USART_CR1_M) {
-            VLOG_INF("9-bit M bit set on %s after %d attempts", priv->uart_label ? priv->uart_label : "(native)", i+1);
-            break;
-        }
+        ensure_brr_and_mbit(usart, expected_brr_9600);
+        if ((usart->CR1 & USART_CR1_M) && usart->BRR == expected_brr_9600) break;
+        k_msleep(RECONFIG_RETRY_DELAY_MS);
+    }
+    /* Also try 115200 in case target switched */
+    for (int i = 0; i < MBIT_RETRY; ++i) {
+        ensure_brr_and_mbit(usart, expected_brr_115200);
+        if ((usart->CR1 & USART_CR1_M) && usart->BRR == expected_brr_115200) break;
         k_msleep(RECONFIG_RETRY_DELAY_MS);
     }
     dump_usart_registers(usart, "AFTER configure attempt");
@@ -496,15 +499,20 @@ static int z_write_cmd(CH375_Context_t *context, uint8_t cmd)
         return ch375_writeCmd_FAILD;
     }
 
+    /* Ensure native USART is in 9-bit mode + BRR (try to be defensive) */
+    prepare_usart_for_transfer_if_possible(priv, 9600);
+
 #if defined(CONFIG_SOC_SERIES_STM32F4X)
     USART_TypeDef *usart = get_usart_from_label(priv->uart_label);
     if (usart) {
         uint16_t txval = 0x100 | (uint16_t)cmd; /* 9th bit = 1 */
+        VLOG_DBG("z_write_cmd: usart write 0x%03X", txval);
         int rc = usart_write9(usart, txval);
         return (rc == 0) ? CH375_SUCCESS : ch375_writeCmd_FAILD;
     }
 #endif
 
+    VLOG_DBG("z_write_cmd: uart_poll_out 0x%02X", cmd);
     uart_poll_out(priv->uart, cmd);
     return CH375_SUCCESS;
 }
@@ -517,15 +525,20 @@ static int z_write_data(CH375_Context_t *context, uint8_t data)
         return ch375_writeCmd_FAILD;
     }
 
+    /* Ensure native USART is in 9-bit mode + BRR (defensive) */
+    prepare_usart_for_transfer_if_possible(priv, 9600);
+
 #if defined(CONFIG_SOC_SERIES_STM32F4X)
     USART_TypeDef *usart = get_usart_from_label(priv->uart_label);
     if (usart) {
         uint16_t txval = (uint16_t)data & 0xFF; /* 9th bit = 0 */
+        VLOG_DBG("z_write_data: usart write 0x%03X", txval);
         int rc = usart_write9(usart, txval);
         return (rc == 0) ? CH375_SUCCESS : ch375_writeCmd_FAILD;
     }
 #endif
 
+    VLOG_DBG("z_write_data: uart_poll_out 0x%02X", data);
     uart_poll_out(priv->uart, data);
     return CH375_SUCCESS;
 }
@@ -538,6 +551,9 @@ static int z_read_data(CH375_Context_t *context, uint8_t *data)
         return ch375_readData_FAILD;
     }
 
+    /* Ensure USART configured for reading as well */
+    prepare_usart_for_transfer_if_possible(priv, 9600);
+
 #if defined(CONFIG_SOC_SERIES_STM32F4X)
     USART_TypeDef *usart = get_usart_from_label(priv->uart_label);
     if (usart) {
@@ -545,8 +561,10 @@ static int z_read_data(CH375_Context_t *context, uint8_t *data)
         int rc = usart_read9(usart, &v, priv->rx_timeout_ms);
         if (rc == 0) {
             *data = (uint8_t)(v & 0xFF);
+            VLOG_DBG("z_read_data: got 0x%03X -> 0x%02X", v, *data);
             return CH375_SUCCESS;
         }
+        VLOG_WRN("z_read_data: usart_read9 rc=%d", rc);
         return ch375_readData_FAILD;
     }
 #endif
@@ -555,10 +573,14 @@ static int z_read_data(CH375_Context_t *context, uint8_t *data)
     int rc = uart_poll_in(priv->uart, &c);
     if (rc == 0) {
         *data = (uint8_t)c;
+        VLOG_DBG("z_read_data: uart_poll_in -> 0x%02X", *data);
         return CH375_SUCCESS;
     }
+    VLOG_WRN("z_read_data: uart_poll_in rc=%d", rc);
     return ch375_readData_FAILD;
 }
+
+
 /* non-blocking query for interrupt - returns 0 if no int, non-zero if int pending */
 static int z_query_int(CH375_Context_t *context)
 {

@@ -17,12 +17,78 @@ LOG_MODULE_REGISTER(hid_bridge, LOG_LEVEL_INF);
 #include "hid/hid_mouse.h"
 #include "hid/hid_keyboard.h"
 #include "hid_bridge.h"
+#include "usbd_core.h"
+#include "composite_hid.h"
 
 /* composite wrapper */
 extern int composite_hid_send_report(uint8_t interface_idx, uint8_t *report, uint16_t len);
+extern uint8_t USBD_COMPOSITE_HID_InterfaceRegister(uint8_t, uint8_t*, uint8_t*, uint16_t, uint8_t, uint8_t);
+extern uint8_t USBD_COMPOSITE_HID_Init(void);
+
 
 /* USB init from usbd_conf.c */
 extern void MX_USB_DEVICE_Init(void);
+
+
+extern USBD_HandleTypeDef hUsbDeviceFS;
+
+/* Simple 3-button mouse report (3 bytes): buttons, dx, dy */
+static const uint8_t composite_mouse_report_desc[] = {
+  0x05, 0x01,        /* Usage Page (Generic Desktop) */
+  0x09, 0x02,        /* Usage (Mouse) */
+  0xA1, 0x01,        /* Collection (Application) */
+    0x09, 0x01,      /*  Usage (Pointer) */
+    0xA1, 0x00,      /*  Collection (Physical) */
+      0x05, 0x09,    /*   Usage Page (Button) */
+      0x19, 0x01,    /*   Usage Minimum (1) */
+      0x29, 0x03,    /*   Usage Maximum (3) */
+      0x15, 0x00,    /*   Logical Minimum (0) */
+      0x25, 0x01,    /*   Logical Maximum (1) */
+      0x95, 0x03,    /*   Report Count (3) */
+      0x75, 0x01,    /*   Report Size (1) */
+      0x81, 0x02,    /*   Input (Data,Var,Abs) -- Buttons */
+      0x95, 0x01,    /*   Report Count (1) */
+      0x75, 0x05,    /*   Report Size (5) */
+      0x81, 0x03,    /*   Input (Const,Var,Abs) -- Padding */
+      0x05, 0x01,    /*   Usage Page (Generic Desktop) */
+      0x09, 0x30,    /*   Usage (X) */
+      0x09, 0x31,    /*   Usage (Y) */
+      0x15, 0x81,    /*   Logical Minimum (-127) */
+      0x25, 0x7F,    /*   Logical Maximum (127) */
+      0x75, 0x08,    /*   Report Size (8) */
+      0x95, 0x02,    /*   Report Count (2) */
+      0x81, 0x06,    /*   Input (Data,Var,Rel) -- X,Y */
+    0xC0,
+  0xC0
+};
+
+
+/* Simple keyboard (boot) report descriptor: modifiers + reserved + 6 keycodes */
+static const uint8_t composite_keyboard_report_desc[] = {
+  0x05, 0x01,        /* Usage Page (Generic Desktop) */
+  0x09, 0x06,        /* Usage (Keyboard) */
+  0xA1, 0x01,        /* Collection (Application) */
+    0x05, 0x07,      /*  Usage Page (Keyboard) */
+    0x19, 0xE0,      /*  Usage Minimum (224) */
+    0x29, 0xE7,      /*  Usage Maximum (231) */
+    0x15, 0x00,      /*  Logical Minimum (0) */
+    0x25, 0x01,      /*  Logical Maximum (1) */
+    0x75, 0x01,      /*  Report Size (1) */
+    0x95, 0x08,      /*  Report Count (8) */
+    0x81, 0x02,      /*  Input (Data,Var,Abs) -- Modifier byte */
+    0x95, 0x01,      /*  Report Count (1) */
+    0x75, 0x08,      /*  Report Size (8) */
+    0x81, 0x03,      /*  Input (Const) -- Reserved */
+    0x95, 0x06,      /*  Report Count (6) */
+    0x75, 0x08,      /*  Report Size (8) */
+    0x15, 0x00,      /*  Logical Minimum (0) */
+    0x25, 0x65,      /*  Logical Maximum (101) */
+    0x05, 0x07,      /*  Usage Page (Keyboard) */
+    0x19, 0x00,      /*  Usage Minimum (0) */
+    0x29, 0x65,      /*  Usage Maximum (101) */
+    0x81, 0x00,      /*  Input (Data,Ary,Abs) -- Keys */
+  0xC0
+};
 
 /* Configure to match your board */
 #define CH375_A_UART_LABEL  "USART_2"
@@ -96,7 +162,9 @@ static void dump_all_devices(void)
     #endif
     
     LOG_INF("=== Total: %zu devices ===", count);
+    (void)dev; /* silence -Wunused-variable when STRUCT_SECTION_FOREACH is empty */
 }
+
 
 static const struct device *try_label_list_and_log(const char *const labels[], size_t n)
 {
@@ -168,6 +236,7 @@ static void ch375_instance_worker(void *p1, void *p2, void *p3)
     HIDKeyboard_t kb;
     int ret;
     uint8_t version;
+    uint8_t out_if_idx = 0;
 
     if (!args) {
         LOG_ERR("no args");
@@ -238,8 +307,7 @@ static void ch375_instance_worker(void *p1, void *p2, void *p3)
         ch375_zephyr_close(ctx);
         return;
     }
-    LOG_INF("Chan %u: USB device opened (VID=%04X PID=%04X)", 
-            args->if_idx, udev.vid, udev.pid);
+    LOG_INF("Chan %u: USB device opened (VID=%04X PID=%04X)", args->if_idx, udev.vid, udev.pid);
 
     /* Open HID device */
     memset(&uhdev, 0, sizeof(uhdev));
@@ -251,19 +319,30 @@ static void ch375_instance_worker(void *p1, void *p2, void *p3)
     }
     LOG_INF("Chan %u: HID device opened (type=%u)", args->if_idx, uhdev.hid_type);
 
-    /* Open specific HID type */
+    /* Choose output composite interface index based on type */
     if (uhdev.hid_type == USBHID_TYPE_MOUSE) {
-        if (hid_mouse_open(&uhdev, &mouse) != USBHID_ERRNO_SUCCESS) {
+        out_if_idx = 0; /* mouse -> composite interface 0 */
+    } else if (uhdev.hid_type == USBHID_TYPE_KEYBOARD) {
+        out_if_idx = 1; /* keyboard -> composite interface 1 */
+    } else {
+        LOG_ERR("Chan %u: Unsupported HID type %u", args->if_idx, uhdev.hid_type);
+        usbhid_close(&uhdev);
+        ch375_hostUdevClose(&udev);
+        ch375_zephyr_close(ctx);
+        return;
+    }
+
+    /* Enter report read loop until device disconnects */
+    if (uhdev.hid_type == USBHID_TYPE_MOUSE) {
+        HIDMouse_t mouse_local;
+        if (hid_mouse_open(&uhdev, &mouse_local) != USBHID_ERRNO_SUCCESS) {
             LOG_ERR("Chan %u: hid_mouse_open failed", args->if_idx);
-            usbhid_close(&uhdev);
-            ch375_hostUdevClose(&udev);
-            ch375_zephyr_close(ctx);
-            return;
+            goto cleanup;
         }
         LOG_INF("Chan %u: Mouse opened, entering report loop", args->if_idx);
-        
+
         while (1) {
-            ret = hid_mouse_fetch_report(&mouse);
+            ret = hid_mouse_fetch_report(&mouse_local);
             if (ret != USBHID_ERRNO_SUCCESS) {
                 if (ret == USBHID_ERRNO_NO_DEV) {
                     LOG_ERR("Chan %u: Device disconnected", args->if_idx);
@@ -272,23 +351,21 @@ static void ch375_instance_worker(void *p1, void *p2, void *p3)
                 k_msleep(10);
                 continue;
             }
-            if (enqueue_report_from_usbhid(&uhdev, args->if_idx) != 0) {
+            if (enqueue_report_from_usbhid(&uhdev, out_if_idx) != 0) {
                 LOG_WRN("Chan %u: Failed to enqueue mouse report", args->if_idx);
             }
         }
-        
-    } else if (uhdev.hid_type == USBHID_TYPE_KEYBOARD) {
-        if (hid_keyboard_open(&uhdev, &kb) != USBHID_ERRNO_SUCCESS) {
+        hid_mouse_close(&mouse_local);
+    } else {
+        HIDKeyboard_t kb_local;
+        if (hid_keyboard_open(&uhdev, &kb_local) != USBHID_ERRNO_SUCCESS) {
             LOG_ERR("Chan %u: hid_keyboard_open failed", args->if_idx);
-            usbhid_close(&uhdev);
-            ch375_hostUdevClose(&udev);
-            ch375_zephyr_close(ctx);
-            return;
+            goto cleanup;
         }
         LOG_INF("Chan %u: Keyboard opened, entering report loop", args->if_idx);
-        
+
         while (1) {
-            ret = hid_keyboard_fetch_report(&kb);
+            ret = hid_keyboard_fetch_report(&kb_local);
             if (ret != USBHID_ERRNO_SUCCESS) {
                 if (ret == USBHID_ERRNO_NO_DEV) {
                     LOG_ERR("Chan %u: Device disconnected", args->if_idx);
@@ -297,20 +374,20 @@ static void ch375_instance_worker(void *p1, void *p2, void *p3)
                 k_msleep(10);
                 continue;
             }
-            if (enqueue_report_from_usbhid(&uhdev, args->if_idx) != 0) {
+            if (enqueue_report_from_usbhid(&uhdev, out_if_idx) != 0) {
                 LOG_WRN("Chan %u: Failed to enqueue keyboard report", args->if_idx);
             }
         }
-        
-    } else {
-        LOG_ERR("Chan %u: Unsupported HID type %u", args->if_idx, uhdev.hid_type);
+        hid_keyboard_close(&kb_local);
     }
 
+cleanup:
     LOG_INF("Chan %u: Worker exiting", args->if_idx);
     usbhid_close(&uhdev);
     ch375_hostUdevClose(&udev);
     ch375_zephyr_close(ctx);
 }
+
 
 /* USB TX worker */
 static void usb_tx_worker(void *p1, void *p2, void *p3)
@@ -319,13 +396,41 @@ static void usb_tx_worker(void *p1, void *p2, void *p3)
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
 
     LOG_INF("USB TX worker started");
-    while (1) {
+    for (;;) {
         if (k_msgq_get(&hid_tx_msgq, &msg, K_FOREVER) != 0) {
             continue;
         }
-        if (composite_hid_send_report(msg.if_idx, msg.data, msg.len) != 0) {
-            LOG_ERR("composite_hid_send_report failed");
+
+        LOG_DBG("usb_tx_worker: dequeued report if=%u len=%u", msg.if_idx, msg.len);
+
+        /* Wait until USB device stack initialized and configured (with bounded retry) */
+        int wait_tries = 0;
+        while ((hUsbDeviceFS.pData == NULL || hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) && wait_tries < 50) {
+            /* small wait to allow USB stack to finish setup */
+            k_msleep(10);
+            wait_tries++;
+        }
+        if (hUsbDeviceFS.pData == NULL || hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) {
+            LOG_WRN("USB not configured after wait, requeueing report if=%u len=%u", msg.if_idx, msg.len);
+            /* try to requeue once with short timeout; if fails, drop (to avoid blocking forever) */
+            if (k_msgq_put(&hid_tx_msgq, &msg, K_MSEC(50)) != 0) {
+                LOG_ERR("hid_tx_msgq requeue failed, dropping report");
+            }
+            continue;
+        }
+
+        /* For extra safety, log composite HID state before transmit */
+        LOG_DBG("composite_hid: interface_cnt=%u ep1=0x%02X ep2=0x%02X",
+                (unsigned)usbd_composite_hid.interface_cnt,
+                usbd_composite_hid.ep_addr[0], usbd_composite_hid.ep_addr[1]);
+
+        int rc = composite_hid_send_report(msg.if_idx, msg.data, msg.len);
+        if (rc != 0) {
+            LOG_ERR("composite_hid_send_report failed (rc=%d) for if=%u", rc, msg.if_idx);
+            /* small backoff to avoid spamming if the host is unhappy */
             k_msleep(5);
+        } else {
+            LOG_DBG("Report sent (if=%u len=%u)", msg.if_idx, msg.len);
         }
     }
 }
@@ -344,28 +449,52 @@ static struct ch375_instance_args inst_b = {
     .if_idx = 1
 };
 
-K_THREAD_DEFINE(hid_bridge_init_id, 2048, hid_bridge_start, NULL, NULL, NULL, 6, 0, 0);
-K_THREAD_DEFINE(usb_tx_thread_id, 4096, usb_tx_worker, NULL, NULL, NULL, 5, 0, 0);
-K_THREAD_DEFINE(ch375_a_thread_id, 8192, ch375_instance_worker, &inst_a, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(ch375_b_thread_id, 8192, ch375_instance_worker, &inst_b, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(hid_bridge_init_id, 16384, hid_bridge_start, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(usb_tx_thread_id, 12288, usb_tx_worker, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(ch375_a_thread_id, 16384, ch375_instance_worker, &inst_a, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(ch375_b_thread_id, 16384, ch375_instance_worker, &inst_b, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(stack_monitor_id, 2048, stack_monitor_thread, NULL, NULL, NULL, 10, 0, 0);
+
+
 
 /* hid_bridge_start uses MX_USB_DEVICE_Init() call */
 void hid_bridge_start(void *p1, void *p2, void *p3)
 {
-    LOG_INF("Zephyr version: %d.%d.%d", 
-        KERNEL_VERSION_MAJOR, 
-        KERNEL_VERSION_MINOR, 
-        KERNEL_PATCHLEVEL);
-
-    #ifdef DEVICE_DT_GET
-        LOG_INF("Using modern device tree API (DEVICE_DT_GET available)");
-    #else
-        LOG_INF("Using legacy device_get_binding API");
-    #endif
-
-
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
     LOG_INF("Init USB Device");
+    LOG_INF("Register composite HID interfaces");
+
+    if (USBD_COMPOSITE_HID_InterfaceRegister(0, NULL,
+            (uint8_t *)composite_mouse_report_desc,
+            sizeof(composite_mouse_report_desc),
+            8, 10) != (uint8_t)USBD_OK) {
+        LOG_ERR("Failed to register mouse interface");
+    }
+
+    if (USBD_COMPOSITE_HID_InterfaceRegister(1, NULL,
+            (uint8_t *)composite_keyboard_report_desc,
+            sizeof(composite_keyboard_report_desc),
+            8, 10) != (uint8_t)USBD_OK) {
+        LOG_ERR("Failed to register keyboard interface");
+    }
+
+    /* initialise composite descriptors internal state */
+    if (USBD_COMPOSITE_HID_Init() != (uint8_t)USBD_OK) {
+        LOG_ERR("USBD_COMPOSITE_HID_Init failed");
+    }
+
+    /* initialise composite descriptors internal state */
+    if (USBD_COMPOSITE_HID_Init() != (uint8_t)USBD_OK) {
+        LOG_ERR("USBD_COMPOSITE_HID_Init failed");
+    } else {
+        LOG_INF("composite_hid: interface_cnt=%u", usbd_composite_hid.interface_cnt);
+        LOG_INF("composite_hid: ep_addr[0]=0x%02X ep_addr[1]=0x%02X",
+                usbd_composite_hid.ep_addr[0], usbd_composite_hid.ep_addr[1]);
+        LOG_INF("composite_hid: report_len[0]=%u report_len[1]=%u",
+                usbd_composite_hid.report_desc_len[0], usbd_composite_hid.report_desc_len[1]);
+    }
+
+    /* now start the Cube USBD stack */
     MX_USB_DEVICE_Init();
 }
 
@@ -396,5 +525,3 @@ static void stack_monitor_thread(void *p1, void *p2, void *p3)
         #endif
     }
 }
-
-K_THREAD_DEFINE(stack_monitor_id, 1024, stack_monitor_thread, NULL, NULL, NULL, 10, 0, 0);
