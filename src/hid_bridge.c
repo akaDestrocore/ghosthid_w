@@ -3,6 +3,7 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/device.h>
+#include <zephyr/version.h>
 #include <string.h>
 
 LOG_MODULE_REGISTER(hid_bridge, LOG_LEVEL_INF);
@@ -31,6 +32,10 @@ extern void MX_USB_DEVICE_Init(void);
 #define CH375_B_UART_LABEL  "USART_3"
 #define CH375_B_GPIO_LABEL  "GPIOE"
 #define CH375_B_INT_PIN     15U
+
+#define DT_ALIAS_ch375_uart_a DT_ALIAS(ch375_uart_a)
+#define DT_ALIAS_ch375_uart_b DT_ALIAS(ch375_uart_b)
+#define DT_ALIAS_ch375_gpio   DT_ALIAS(ch375_gpio)
 
 /* msgq for TX */
 #define MAX_REPORT_SIZE 64
@@ -71,6 +76,28 @@ struct ch375_instance_args {
     uint8_t if_idx;
 };
 
+static void dump_all_devices(void)
+{
+    const struct device *dev;
+    size_t count = 0;
+    
+    LOG_INF("=== Enumerating all devices ===");
+    
+    #if KERNEL_VERSION_NUMBER >= ZEPHYR_VERSION(3,0,0)
+        // Modern API: iterate device list
+        STRUCT_SECTION_FOREACH(device, dev) {
+            if (dev && dev->name) {
+                LOG_INF("  [%zu] name='%s' @ %p", count++, dev->name, dev);
+            }
+        }
+    #else
+        // Older Zephyr: no portable way to enumerate all devices
+        LOG_WRN("Cannot enumerate devices on Zephyr < 3.0");
+    #endif
+    
+    LOG_INF("=== Total: %zu devices ===", count);
+}
+
 static const struct device *try_label_list_and_log(const char *const labels[], size_t n)
 {
     for (size_t i = 0; i < n; ++i) {
@@ -90,36 +117,46 @@ static const struct device *try_label_list_and_log(const char *const labels[], s
 
 static const struct device *find_uart2_dev(void)
 {
-    const char *labels[] = {
-        "USART_2",
-        "UART_2",
-        "usart2",
-        NULL
-    };
+    #if DT_NODE_HAS_STATUS(DT_ALIAS(ch375_uart_a), okay)
+        const struct device *dev = DEVICE_DT_GET(DT_ALIAS(ch375_uart_a));
+        if (device_is_ready(dev)) {
+            LOG_INF("UART2 via DT alias: %s @ %p", dev->name, dev);
+            return dev;
+        }
+    #endif
+    
+    // Fallback to device_get_binding for older Zephyr
+    const char *labels[] = {"USART_2", "UART_2", "usart2", "usart@40004400", NULL};
     return try_label_list_and_log(labels, ARRAY_SIZE(labels));
 }
 
 static const struct device *find_uart3_dev(void)
 {
-    const char *labels[] = {
-        "USART_3",
-        "UART_3",
-        "usart3",
-        NULL
-    };
+    #if DT_NODE_HAS_STATUS(DT_ALIAS(ch375_uart_b), okay)
+        const struct device *dev = DEVICE_DT_GET(DT_ALIAS(ch375_uart_b));
+        if (device_is_ready(dev)) {
+            LOG_INF("UART3 via DT alias: %s @ %p", dev->name, dev);
+            return dev;
+        }
+    #endif
+    
+    const char *labels[] = {"USART_3", "UART_3", "usart3", "usart@40004800", NULL};
     return try_label_list_and_log(labels, ARRAY_SIZE(labels));
 }
 
 static const struct device *find_gpioe_dev(void)
 {
-    const char *labels[] = {
-        "GPIOE",
-        "gpioe",
-        NULL
-    };
+    #if DT_NODE_HAS_STATUS(DT_ALIAS(ch375_gpio), okay)
+        const struct device *dev = DEVICE_DT_GET(DT_ALIAS(ch375_gpio));
+        if (device_is_ready(dev)) {
+            LOG_INF("GPIOE via DT alias: %s @ %p", dev->name, dev);
+            return dev;
+        }
+    #endif
+    
+    const char *labels[] = {"GPIOE", "gpioe", "gpio@40021000", NULL};
     return try_label_list_and_log(labels, ARRAY_SIZE(labels));
 }
-
 
 static void ch375_instance_worker(void *p1, void *p2, void *p3)
 {
@@ -130,100 +167,149 @@ static void ch375_instance_worker(void *p1, void *p2, void *p3)
     HIDMouse_t mouse;
     HIDKeyboard_t kb;
     int ret;
+    uint8_t version;
 
     if (!args) {
         LOG_ERR("no args");
         return;
     }
-    LOG_INF("CH375 worker start for UART=%s GPIO=%s INT=%u -> if=%u",
-            args->uart_label, args->gpio_label, args->int_pin, args->if_idx);
-
-    /*********************************************************************************************** */
-    /* resolve device handles (try DT label then fallbacks) */
+    
+    LOG_INF("CH375 worker %u: starting", args->if_idx);
+    k_msleep(100 * args->if_idx);  // Stagger startup
+    
     const struct device *uart_dev = (args->if_idx == 0) ? find_uart2_dev() : find_uart3_dev();
     const struct device *gpio_dev = find_gpioe_dev();
 
     if (!uart_dev || !gpio_dev) {
-        LOG_ERR("device binding checks failed for chan %u (uart=%p gpio=%p)",
-                args->if_idx, uart_dev, gpio_dev);
+        LOG_ERR("Device binding failed for chan %u", args->if_idx);
         return;
     }
 
-    /* device->name is a string usable by legacy APIs that expect a label */
-    const char *resolved_uart_label = uart_dev->name;
-    const char *resolved_gpio_label = gpio_dev->name;
+    const char *uart_label = uart_dev->name;
+    const char *gpio_label = gpio_dev->name;
 
-    LOG_INF("Resolved labels for chan %u: uart=%s gpio=%s",
-            args->if_idx, resolved_uart_label, resolved_gpio_label);
+    LOG_INF("Chan %u: Opening CH375 adapter (uart=%s gpio=%s pin=%u)",
+            args->if_idx, uart_label, gpio_label, args->int_pin);
 
-    /* Use the resolved labels only (drop the old args->uart_label call) */
-    ret = ch375_zephyr_open(resolved_uart_label, resolved_gpio_label, args->int_pin, &ctx);
-    /*********************************************************************************************** */
+    ret = ch375_zephyr_open(uart_label, gpio_label, args->int_pin, &ctx);
     if (ret != CH375_SUCCESS) {
         LOG_ERR("ch375_zephyr_open=%d", ret);
         return;
     }
 
+    LOG_INF("Chan %u: CH375 adapter opened", args->if_idx);
+
+    ret = ch375_getVersion(ctx, &version);
+    if (ret == CH375_SUCCESS) {
+        LOG_INF("Chan %u: CH375 version 0x%02X", args->if_idx, version);
+    } else {
+        LOG_ERR("Chan %u: ch375_getVersion failed: %d", args->if_idx, ret);
+    }
+
+    ret = ch375_checkExist(ctx);
+    if (ret != CH375_SUCCESS) {
+        LOG_ERR("Chan %u: ch375_checkExist failed: %d", args->if_idx, ret);
+        ch375_zephyr_close(ctx);
+        return;
+    }
+    LOG_INF("Chan %u: CH375 communication verified", args->if_idx);
+
+    /* Initialize CH375 USB host mode */
     if (ch375_hostInit(ctx, 9600) != CH375_HST_ERRNO_SUCCESS) {
-        LOG_ERR("ch375_hostInit failed");
+        LOG_ERR("Chan %u: ch375_hostInit failed", args->if_idx);
         ch375_zephyr_close(ctx);
         return;
     }
+    LOG_INF("Chan %u: CH375 host mode initialized", args->if_idx);
 
+    /* Wait for device connection */
+    LOG_INF("Chan %u: Waiting for device connection...", args->if_idx);
     if (ch375_hostWaitDeviceConnect(ctx, 5000) != CH375_HST_ERRNO_SUCCESS) {
-        LOG_WRN("no device connected to CH375 (timeout)");
+        LOG_WRN("Chan %u: No device connected (timeout)", args->if_idx);
         ch375_zephyr_close(ctx);
         return;
     }
+    LOG_INF("Chan %u: Device connected!", args->if_idx);
 
+    /* Open USB device */
     memset(&udev, 0, sizeof(udev));
     if (ch375_hostUdevOpen(ctx, &udev) != CH375_HST_ERRNO_SUCCESS) {
-        LOG_ERR("ch375_hostUdevOpen failed");
+        LOG_ERR("Chan %u: ch375_hostUdevOpen failed", args->if_idx);
         ch375_zephyr_close(ctx);
         return;
     }
+    LOG_INF("Chan %u: USB device opened (VID=%04X PID=%04X)", 
+            args->if_idx, udev.vid, udev.pid);
 
+    /* Open HID device */
     memset(&uhdev, 0, sizeof(uhdev));
     if (usbhid_open(&udev, 0, &uhdev) != USBHID_ERRNO_SUCCESS) {
-        LOG_ERR("usbhid_open failed");
+        LOG_ERR("Chan %u: usbhid_open failed", args->if_idx);
         ch375_hostUdevClose(&udev);
         ch375_zephyr_close(ctx);
         return;
     }
+    LOG_INF("Chan %u: HID device opened (type=%u)", args->if_idx, uhdev.hid_type);
 
+    /* Open specific HID type */
     if (uhdev.hid_type == USBHID_TYPE_MOUSE) {
         if (hid_mouse_open(&uhdev, &mouse) != USBHID_ERRNO_SUCCESS) {
-            LOG_ERR("hid_mouse_open failed");
+            LOG_ERR("Chan %u: hid_mouse_open failed", args->if_idx);
             usbhid_close(&uhdev);
+            ch375_hostUdevClose(&udev);
             ch375_zephyr_close(ctx);
             return;
         }
+        LOG_INF("Chan %u: Mouse opened, entering report loop", args->if_idx);
+        
         while (1) {
             ret = hid_mouse_fetch_report(&mouse);
             if (ret != USBHID_ERRNO_SUCCESS) {
-                k_msleep(100);
+                if (ret == USBHID_ERRNO_NO_DEV) {
+                    LOG_ERR("Chan %u: Device disconnected", args->if_idx);
+                    break;
+                }
+                k_msleep(10);
                 continue;
             }
-            enqueue_report_from_usbhid(&uhdev, args->if_idx);
+            if (enqueue_report_from_usbhid(&uhdev, args->if_idx) != 0) {
+                LOG_WRN("Chan %u: Failed to enqueue mouse report", args->if_idx);
+            }
         }
+        
     } else if (uhdev.hid_type == USBHID_TYPE_KEYBOARD) {
         if (hid_keyboard_open(&uhdev, &kb) != USBHID_ERRNO_SUCCESS) {
-            LOG_ERR("hid_keyboard_open failed");
+            LOG_ERR("Chan %u: hid_keyboard_open failed", args->if_idx);
             usbhid_close(&uhdev);
+            ch375_hostUdevClose(&udev);
             ch375_zephyr_close(ctx);
             return;
         }
+        LOG_INF("Chan %u: Keyboard opened, entering report loop", args->if_idx);
+        
         while (1) {
             ret = hid_keyboard_fetch_report(&kb);
             if (ret != USBHID_ERRNO_SUCCESS) {
-                k_msleep(100);
+                if (ret == USBHID_ERRNO_NO_DEV) {
+                    LOG_ERR("Chan %u: Device disconnected", args->if_idx);
+                    break;
+                }
+                k_msleep(10);
                 continue;
             }
-            enqueue_report_from_usbhid(&uhdev, args->if_idx);
+            if (enqueue_report_from_usbhid(&uhdev, args->if_idx) != 0) {
+                LOG_WRN("Chan %u: Failed to enqueue keyboard report", args->if_idx);
+            }
         }
+        
     } else {
-        LOG_ERR("unsupported HID type %u", uhdev.hid_type);
+        LOG_ERR("Chan %u: Unsupported HID type %u", args->if_idx, uhdev.hid_type);
     }
+
+    LOG_INF("Chan %u: Worker exiting", args->if_idx);
+    usbhid_close(&uhdev);
+    ch375_hostUdevClose(&udev);
+    ch375_zephyr_close(ctx);
 }
 
 /* USB TX worker */
@@ -258,20 +344,57 @@ static struct ch375_instance_args inst_b = {
     .if_idx = 1
 };
 
-/* Auto-start thread definitions (K_THREAD_DEFINE creates stack+TCB statically) */
-K_THREAD_DEFINE(hid_bridge_init_id, 1024, hid_bridge_start, NULL, NULL, NULL, 6, 0, 0);
-
-/* usb tx */
-K_THREAD_DEFINE(usb_tx_thread_id, 2048, usb_tx_worker, NULL, NULL, NULL, 5, 0, 0);
-
-/* per-ch375 threads */
-K_THREAD_DEFINE(ch375_a_thread_id, 4096, ch375_instance_worker, &inst_a, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(ch375_b_thread_id, 4096, ch375_instance_worker, &inst_b, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(hid_bridge_init_id, 2048, hid_bridge_start, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(usb_tx_thread_id, 4096, usb_tx_worker, NULL, NULL, NULL, 5, 0, 0);
+K_THREAD_DEFINE(ch375_a_thread_id, 8192, ch375_instance_worker, &inst_a, NULL, NULL, 7, 0, 0);
+K_THREAD_DEFINE(ch375_b_thread_id, 8192, ch375_instance_worker, &inst_b, NULL, NULL, 7, 0, 0);
 
 /* hid_bridge_start uses MX_USB_DEVICE_Init() call */
 void hid_bridge_start(void *p1, void *p2, void *p3)
 {
+    LOG_INF("Zephyr version: %d.%d.%d", 
+        KERNEL_VERSION_MAJOR, 
+        KERNEL_VERSION_MINOR, 
+        KERNEL_PATCHLEVEL);
+
+    #ifdef DEVICE_DT_GET
+        LOG_INF("Using modern device tree API (DEVICE_DT_GET available)");
+    #else
+        LOG_INF("Using legacy device_get_binding API");
+    #endif
+
+
     ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
     LOG_INF("Init USB Device");
     MX_USB_DEVICE_Init();
 }
+
+static void stack_monitor_thread(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+    
+    while (1) {
+        k_msleep(5000);  // Check every 5 seconds
+        
+        LOG_INF("=== Stack Usage Report ===");
+        
+        #ifdef CONFIG_THREAD_STACK_INFO
+        size_t unused;
+        
+        if (k_thread_stack_space_get(&hid_bridge_init_id, &unused) == 0) {
+            LOG_INF("  hid_bridge_init: %zu bytes unused", unused);
+        }
+        if (k_thread_stack_space_get(&usb_tx_thread_id, &unused) == 0) {
+            LOG_INF("  usb_tx: %zu bytes unused", unused);
+        }
+        if (k_thread_stack_space_get(&ch375_a_thread_id, &unused) == 0) {
+            LOG_INF("  ch375_a: %zu bytes unused", unused);
+        }
+        if (k_thread_stack_space_get(&ch375_b_thread_id, &unused) == 0) {
+            LOG_INF("  ch375_b: %zu bytes unused", unused);
+        }
+        #endif
+    }
+}
+
+K_THREAD_DEFINE(stack_monitor_id, 1024, stack_monitor_thread, NULL, NULL, NULL, 10, 0, 0);

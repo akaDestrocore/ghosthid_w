@@ -3,6 +3,12 @@
         zephyr,console = &uart4;
         zephyr,shell-uart = &uart4;
     };
+    
+    aliases {
+        ch375-uart-a = &usart2;
+        ch375-uart-b = &usart3;
+        ch375-gpio = &gpioe;
+    };
 };
 
 &usart2 {
