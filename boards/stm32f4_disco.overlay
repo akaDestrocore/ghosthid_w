@@ -15,14 +15,14 @@
     pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
     pinctrl-names = "default";
     status = "okay";
-    label = "UART_2";
+    label = "USART_2";
 };
 
 &usart3 {
     pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
     pinctrl-names = "default";
     status = "okay";
-    label = "UART_3";
+    label = "USART_3";
 };
 
 &uart4 {

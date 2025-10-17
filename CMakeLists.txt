@@ -14,8 +14,15 @@ target_sources(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/hid.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/hid_mouse.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/hid_keyboard.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/usb_hid_device.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/auto_gun_press.c
 )
 
 target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Enable floating point support for AGP calculations
+target_compile_options(app PRIVATE
+    -fno-strict-aliasing
 )
