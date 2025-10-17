@@ -1,72 +1,73 @@
-#include <assert.h>
+/* src/ch375.c
+ *
+ * Zephyr-adapted CH375 core. Based on Drivers/ch375/src/ch375.c but
+ * replaced HAL calls and stdlib functions with Zephyr APIs.
+ *
+ * Important: this file expects the low-level I/O to be supplied by the
+ * CH375 context write_cmd/write_data/read_data/query_int function pointers.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define ENABLE_LOG
-// #define ENABLE_DEBUG
-#include "log_compat.h"
 #include "ch375.h"
+#include "ch375_interface.h"
 
+LOG_MODULE_REGISTER(ch375, LOG_LEVEL_INF);
+
+/* local convenience: millisecond sleep wrapper */
+static inline void _msleep(uint32_t ms)
+{
+    if (ms == 0) {
+        return;
+    }
+    /* k_msleep is safe even in threads */
+    k_msleep(ms);
+}
+
+/* timeouts in ms used in original code; WAIT_INT_TIMEOUT_MS defined there */
 #define WAIT_INT_TIMEOUT_MS (2 * 1000)
 
-/**
- * @brief commands
- */
+/* commands from original */
 #define CH375_CMD_GET_IC_VER    0x01
 #define CH375_CMD_SET_BAUDRATE  0x02
 #define CH375_CMD_SET_USB_SPEED 0x04
 #define CH375_CMD_CHECK_EXIST   0x06
-#define	CH375_CMD_GET_DEV_RATE	0x0A
-#define	CH375_CMD_SET_RETRY     0x0B			/* 主机方式: 设置USB事务操作的重试次数 */
-#define	CH375_CMD_SET_USB_ADDR	0x13			/* 设置USB地址 */
+#define CH375_CMD_GET_DEV_RATE  0x0A
+#define CH375_CMD_SET_RETRY     0x0B
+#define CH375_CMD_SET_USB_ADDR  0x13
 #define CH375_CMD_SET_USB_MODE  0x15
 #define CH375_CMD_TEST_CONNECT  0x16
 #define CH375_CMD_ABORT_NAK     0x17
-#define	CH375_CMD_SET_ENDP6	    0x1C			/* 设置USB端点2/主机端点的接收器 */
-#define	CH375_CMD_SET_ENDP7	    0x1D			/* 设置USB端点2/主机端点的发送器 */
+#define CH375_CMD_SET_ENDP6     0x1C
+#define CH375_CMD_SET_ENDP7     0x1D
 #define CH375_CMD_GET_STATUS    0x22
-#define	CH375_CMD_UNLOCK_USB    0x23		/* 设备方式: 释放当前USB缓冲区 */
-#define	CH375_CMD_RD_USB_DATA0  0x27			/* 从当前USB中断的端点缓冲区读取数据块 */
-#define	CH375_CMD_RD_USB_DATA   0x28		/* 从当前USB中断的端点缓冲区读取数据块, 并释放缓冲区, 相当于 CMD_RD_USB_DATA0 + CMD_UNLOCK_USB */
-#define	CH375_CMD_WR_USB_DATA7  0x2B			/* 向USB端点2或者主机端点的发送缓冲区写入数据块 */
+#define CH375_CMD_UNLOCK_USB    0x23
+#define CH375_CMD_RD_USB_DATA0  0x27
+#define CH375_CMD_RD_USB_DATA   0x28
+#define CH375_CMD_WR_USB_DATA7  0x2B
 #define CH375_CMD_GET_DESC      0x46
-#define	CH375_CMD_ISSUE_TKN_X   0x4E			/* 主机方式: 发出同步令牌, 执行事务, 该命令可代替 CMD_SET_ENDP6/CMD_SET_ENDP7 + CMD_ISSUE_TOKEN */
+#define CH375_CMD_ISSUE_TKN_X   0x4E
 #define CH375_CMD_ISSUE_TOKEN   0x4F
 
-/**
- * @brief command result
- */
 #define CH375_CMD_RET_SUCCESS 0x51
-#define	CH375_CMD_RET_FAILED 0x5F
+#define CH375_CMD_RET_FAILED  0x5F
 
-/**
- * @brief send data1 to ch375, should recevie data2
- */
 #define ch375_checkExist_DATA1 0x65
 #define CH375_CHECK_EIXST_DATA2 ((uint8_t)~ch375_checkExist_DATA1)
 
-/**
- * @brief 
- * CH375_CMD_GET_DEV_RATE, data
- */
 #define CH375_GET_DEV_RATE_DATA 0x07
 
-/**
- * @brief 
- * CH375_CMD_SET_USB_SPEED, data
- */
 #define CH375_SET_USB_SPEED_LOW 0x02
 #define CH375_SET_USB_SPEED_FULL 0x00
 
-/**
- * @brief 
- * CH375_CMD_SET_RETRY
- */
 #define ch375_setRetry_DATA 0x25
 
-
-typedef struct CH375_Context_t CH375_Context_t;
-
+/* The context struct is defined in implementation (CH375 interface typedef exists) */
 struct CH375_Context_t {
     void *priv;
     func_write_cmd write_cmd;
@@ -75,11 +76,10 @@ struct CH375_Context_t {
     func_query_int query_int;
 };
 
-
 int ch375_writeCmd(CH375_Context_t *context, uint8_t cmd)
 {
     if (context == NULL) {
-        ERROR("param context can't be NULL\n");
+        LOG_ERR("ch375_writeCmd: null context");
         return CH375_PARAM_INVALID;
     }
 
@@ -89,7 +89,7 @@ int ch375_writeCmd(CH375_Context_t *context, uint8_t cmd)
 int ch375_write_data(CH375_Context_t *context, uint8_t data)
 {
     if (context == NULL) {
-        ERROR("param context can't be NULL\n");
+        LOG_ERR("ch375_write_data: null context");
         return CH375_PARAM_INVALID;
     }
 
@@ -99,20 +99,12 @@ int ch375_write_data(CH375_Context_t *context, uint8_t data)
 int ch375_readData(CH375_Context_t *context, uint8_t *data)
 {
     if (data == NULL) {
-        ERROR("param data can't be NULL");
+        LOG_ERR("ch375_readData: null data ptr");
         return CH375_PARAM_INVALID;
     }
     return context->read_data(context, data);
 }
 
-/**
- * @brief 
- * 
- * @param context 
- * @param buf 
- * @param len
- * @return int 
- */
 int ch375_writeBlockData(CH375_Context_t *context, uint8_t *buf, uint8_t len)
 {
     int ret;
@@ -139,14 +131,6 @@ int ch375_writeBlockData(CH375_Context_t *context, uint8_t *buf, uint8_t len)
     return CH375_SUCCESS;
 }
 
-/**
- * @brief 
- * 
- * @param context 
- * @param buf 
- * @param len must be greater than 64, avoid overflow
- * @return uint8_t
- */
 int ch375_readBlockData(CH375_Context_t *context, uint8_t *buf, uint8_t len, uint8_t *actual_len)
 {
     int ret;
@@ -155,12 +139,11 @@ int ch375_readBlockData(CH375_Context_t *context, uint8_t *buf, uint8_t len, uin
     uint8_t offset;
 
     if (buf == NULL) {
-        ERROR("param buf can't be NULL");
+        LOG_ERR("ch375_readBlockData: buf NULL");
         return CH375_PARAM_INVALID;
     }
-    // TODO len check, and read overflowed data
     if (actual_len == NULL) {
-        ERROR("param actual_len can't be NULL");
+        LOG_ERR("ch375_readBlockData: actual_len NULL");
         return CH375_PARAM_INVALID;
     }
 
@@ -184,7 +167,7 @@ int ch375_readBlockData(CH375_Context_t *context, uint8_t *buf, uint8_t len, uin
         offset++;
         residue_len--;
     }
-    DEBUG("actual_len=%d", offset);
+    LOG_DBG("ch375_readBlockData actual_len=%d", offset);
     *actual_len = offset;
     return CH375_SUCCESS;
 }
@@ -195,7 +178,7 @@ int ch375_getVersion(CH375_Context_t *context, uint8_t *version)
     int ret = -1;
 
     if (version == NULL) {
-        ERROR("param version can't be NULL");
+        LOG_ERR("ch375_getVersion: version NULL");
         return CH375_PARAM_INVALID;
     }
 
@@ -207,7 +190,7 @@ int ch375_getVersion(CH375_Context_t *context, uint8_t *version)
     if (ret != CH375_SUCCESS) {
         return ch375_readData_FAILD;
     }
-    // lower 6 bits is vesion, ref CH375DS1.PDF
+    /* lower 6 bits is version, ref CH375 datasheet */
     *version = 0x3F & buf;
     return CH375_SUCCESS;
 }
@@ -225,7 +208,7 @@ int ch375_setBaudrate(CH375_Context_t *context, uint32_t baudrate)
         data1 = 0x03;
         data2 = 0xCC;
     } else {
-        ERROR("baudrate(%lu) not support", baudrate);
+        LOG_ERR("ch375_setBaudrate: unsupported %lu", (unsigned long)baudrate);
         return CH375_PARAM_INVALID;
     }
 
@@ -257,20 +240,11 @@ int ch375_waitInt(CH375_Context_t *context, uint32_t timeout)
         if (ch375_queryInt(context)) {
             return CH375_SUCCESS;
         }
-        k_msleep(1);
+        _msleep(1);
     }
     return CH375_TIMEOUT;
 }
 
-/**
- * @brief check the ch375 is working fine
- * 
- * @param context 
- * @return int  CH375_SUCCESS
- *              CH375_SEND_CMD_FAILD
- *              CH375_RECV_DATA_FAILD
- *              CH375_NO_EXIST
- */
 int ch375_checkExist(CH375_Context_t *context)
 {
     uint8_t recv_buf = 0;
@@ -287,8 +261,7 @@ int ch375_checkExist(CH375_Context_t *context)
         return ch375_readData_FAILD;
     }
     if (recv_buf != CH375_CHECK_EIXST_DATA2) {
-        ERROR("receive error check exist data = 0x%02X, should be 0x%02X",
-            recv_buf, CH375_CHECK_EIXST_DATA2);
+        LOG_ERR("ch375_checkExist: receive 0x%02X expected 0x%02X", recv_buf, CH375_CHECK_EIXST_DATA2);
         return CH375_NO_EXIST;
     }
     return CH375_SUCCESS;
@@ -308,7 +281,8 @@ int ch375_setUSBMode(CH375_Context_t *context, uint8_t mode)
         return ch375_writeCmd_FAILD;
     }
 
-    k_msleep(1); // 20us to set success, 1ms is enough
+    /* original comment: 20us to set success, 1ms is enough (we keep 1ms) */
+    _msleep(1);
 
     ret = ch375_readData(context, &buf);
     if (ret != CH375_SUCCESS) {
@@ -316,7 +290,7 @@ int ch375_setUSBMode(CH375_Context_t *context, uint8_t mode)
     }
 
     if (buf != CH375_CMD_RET_SUCCESS) {
-        ERROR("set mode failed, ret code=0x%02X", buf);
+        LOG_ERR("ch375_setUSBMode failed, ret code=0x%02X", buf);
         return CH375_ERROR;
     }
     return CH375_SUCCESS;
@@ -369,15 +343,11 @@ int ch375_setDevSpeed(CH375_Context_t *context, uint8_t speed)
     uint8_t val;
 
     if (speed != CH375_USB_SPEED_LOW && speed != CH375_USB_SPEED_FULL) {
-        ERROR("param speed(0x%02X) invalid", speed);
+        LOG_ERR("ch375_setDevSpeed invalid speed 0x%02X", speed);
         return CH375_PARAM_INVALID;
     }
 
-    if (speed == CH375_USB_SPEED_LOW) {
-        val = CH375_SET_USB_SPEED_LOW;
-    } else {
-        val = CH375_SET_USB_SPEED_FULL;
-    }
+    val = (speed == CH375_USB_SPEED_LOW) ? CH375_SET_USB_SPEED_LOW : CH375_SET_USB_SPEED_FULL;
 
     ret = ch375_writeCmd(context, CH375_CMD_SET_USB_SPEED);
     if (ret != CH375_SUCCESS) {
@@ -391,13 +361,6 @@ int ch375_setDevSpeed(CH375_Context_t *context, uint8_t speed)
     return CH375_SUCCESS;
 }
 
-/**
- * @brief 
- * 
- * @param context 
- * @param connect_status CH375_USB_INT_CONNECT, CH375_USB_INT_DISCONNECT, CH375_USB_INT_USB_READY
- * @return 
- */
 int ch375_testConnect(CH375_Context_t *context, uint8_t *connect_status)
 {
     int ret;
@@ -405,29 +368,28 @@ int ch375_testConnect(CH375_Context_t *context, uint8_t *connect_status)
     uint8_t status;
 
     if (connect_status == NULL) {
-        ERROR("param connect_status can't be NULL");
+        LOG_ERR("ch375_testConnect param null");
         return CH375_PARAM_INVALID;
     }
-    
+
     ret = ch375_writeCmd(context, CH375_CMD_TEST_CONNECT);
     if (ret != CH375_SUCCESS) {
         return ch375_writeCmd_FAILD;
     }
-    k_msleep(1);
+    _msleep(1);
 
     ret = ch375_readData(context, &buf);
     if (ret != CH375_SUCCESS) {
         return ch375_readData_FAILD;
     }
 
-    DEBUG("test connect status=0x%02X", buf);
-    // buf = CH375_USB_INT_CONNECT, CH375_H_INT_DISCONNECT, CH375_H_INT_USB_READY
+    LOG_DBG("ch375_testConnect status=0x%02X", buf);
     if (buf != CH375_USB_INT_DISCONNECT &&
         buf != CH375_USB_INT_CONNECT &&
         buf != CH375_USB_INT_USB_READY) {
         buf = CH375_USB_INT_DISCONNECT;
     }
-    
+
     if (buf == CH375_USB_INT_DISCONNECT) {
         (void)ch375_getStatus(context, &status);
     }
@@ -442,7 +404,7 @@ int ch375_getStatus(CH375_Context_t *context, uint8_t *status)
     int ret = -1;
 
     if (status == NULL) {
-        ERROR("param status can't be NULL");
+        LOG_ERR("ch375_getStatus param null");
         return CH375_PARAM_INVALID;
     }
 
@@ -453,7 +415,7 @@ int ch375_getStatus(CH375_Context_t *context, uint8_t *status)
 
     ret = ch375_readData(context, &buf);
     if (ret != CH375_SUCCESS) {
-        ERROR("read data failed");
+        LOG_ERR("ch375_getStatus readData failed");
         return ch375_readData_FAILD;
     }
 
@@ -468,17 +430,9 @@ int ch375_abortNAK(CH375_Context_t *context)
     if (ret != CH375_SUCCESS) {
         return ch375_writeCmd_FAILD;
     }
-
     return CH375_SUCCESS;
 }
 
-/*bit7 bit6:NAK重试
-   1     0  对NAK无限重试
-   1     1  对NAK重试200ms-2s
-   0     x  直接返回NAK
-bit5-bit0 (0-63) :响应超时重试次数（针对所有传输，超时5次）
-*/
-/* times的值： 0：NAK不重试  1：重试200-2s  >2:无限次重试NAK */
 int ch375_setRetry(CH375_Context_t *context, uint8_t times)
 {
     int ret;
@@ -515,13 +469,10 @@ int ch375_sendToken(CH375_Context_t *context, uint8_t ep, uint8_t tog, uint8_t p
     uint8_t ep_pid;
     uint8_t st;
 
-    // 7bits: in ep tog, 6bits: out ep tog, 5~0bits: must be zero
-    tog_val = tog ? 0xC0: 0x00;
-    // tog_val = tog;
-    // 7~4bits: ep, 3~0bits: pid
+    tog_val = tog ? 0xC0 : 0x00;
     ep_pid = (ep << 4) | pid;
-    DEBUG("togval=0x%02X", tog_val);
-    DEBUG("ep_pid=0x%02X", ep_pid);
+
+    LOG_DBG("ch375_sendToken tog=0x%02X ep_pid=0x%02X", tog_val, ep_pid);
 
     ret = ch375_writeCmd(context, CH375_CMD_ISSUE_TKN_X);
     if (ret != CH375_SUCCESS) {
@@ -530,13 +481,13 @@ int ch375_sendToken(CH375_Context_t *context, uint8_t ep, uint8_t tog, uint8_t p
     ret = ch375_write_data(context, tog_val);
     if (ret != CH375_SUCCESS) {
         return ch375_writeCmd_FAILD;
-    }    
+    }
     ret = ch375_write_data(context, ep_pid);
     if (ret != CH375_SUCCESS) {
         return ch375_writeCmd_FAILD;
     }
 
-    // wait intrrupt, get result of token send.
+    /* wait interrupt and read status */
     ret = ch375_waitInt(context, WAIT_INT_TIMEOUT_MS);
     if (ret != CH375_SUCCESS) {
         return CH375_TIMEOUT;
@@ -545,32 +496,34 @@ int ch375_sendToken(CH375_Context_t *context, uint8_t ep, uint8_t tog, uint8_t p
     if (ret != CH375_SUCCESS) {
         return CH375_ERROR;
     }
-    
+
     *status = st;
     return CH375_SUCCESS;
 }
 
+/* sanity check helper */
 static int check_context_invalid(CH375_Context_t *context)
 {
-    assert(context);
-    
+    if (!context) {
+        LOG_ERR("check_context_invalid: context NULL");
+        return CH375_ERROR;
+    }
     if (context->query_int == NULL) {
-        ERROR("context->query_int is NULL");
+        LOG_ERR("context->query_int is NULL");
         goto failed;
     }
     if (context->write_cmd == NULL) {
-        ERROR("context->write_cmd is NULL");
+        LOG_ERR("context->write_cmd is NULL");
         goto failed;
     }
     if (context->read_data == NULL) {
-        ERROR("context->read_data is NULL");
+        LOG_ERR("context->read_data is NULL");
         goto failed;
     }
     if (context->write_data == NULL) {
-        ERROR("context->write_data is NULL");
+        LOG_ERR("context->write_data is NULL");
         goto failed;
     }
-
     return CH375_SUCCESS;
 failed:
     return CH375_ERROR;
@@ -587,15 +540,15 @@ void *ch375_getPriv(CH375_Context_t *context)
 int ch375_closeContext(CH375_Context_t *context)
 {
     if (context == NULL) {
-        ERROR("param context can't be NULL");
+        LOG_ERR("ch375_closeContext: null context");
         return CH375_PARAM_INVALID;
     }
     memset(context, 0, sizeof(CH375_Context_t));
-    free(context);
+    k_free(context);
     return CH375_SUCCESS;
 }
 
-int ch375_openContext(CH375_Context_t **context, 
+int ch375_openContext(CH375_Context_t **context,
     func_write_cmd write_cmd,
     func_write_data write_data,
     func_read_data read_data,
@@ -604,11 +557,15 @@ int ch375_openContext(CH375_Context_t **context,
 {
     CH375_Context_t *ctx;
     if (context == NULL) {
-        ERROR("param context can't be NULL");
+        LOG_ERR("ch375_openContext: null out ptr");
         return CH375_PARAM_INVALID;
     }
 
-    ctx = (CH375_Context_t *)malloc(sizeof(CH375_Context_t));
+    ctx = (CH375_Context_t *)k_malloc(sizeof(CH375_Context_t));
+    if (!ctx) {
+        LOG_ERR("ch375_openContext: alloc failed");
+        return CH375_ERROR;
+    }
     memset(ctx, 0, sizeof(CH375_Context_t));
 
     ctx->priv = priv;
@@ -618,7 +575,8 @@ int ch375_openContext(CH375_Context_t **context,
     ctx->query_int = query_int;
 
     if (check_context_invalid(ctx) != CH375_SUCCESS) {
-        ERROR("check context failed");
+        LOG_ERR("ch375_openContext: check_context_invalid");
+        k_free(ctx);
         return CH375_PARAM_INVALID;
     }
 

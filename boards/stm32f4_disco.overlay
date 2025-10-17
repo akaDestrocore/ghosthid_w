@@ -14,15 +14,15 @@
 &usart2 {
     pinctrl-0 = <&usart2_tx_pa2 &usart2_rx_pa3>;
     pinctrl-names = "default";
-    current-speed = <9600>;
     status = "okay";
+    label = "UART_2";
 };
 
 &usart3 {
     pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
     pinctrl-names = "default";
-    current-speed = <9600>;
     status = "okay";
+    label = "UART_3";
 };
 
 &uart4 {
@@ -35,9 +35,8 @@
 
 &usbotg_fs {
     status = "okay";
-    pinctrl-0 = <&usb_otg_fs_dm_pa11 &usb_otg_fs_dp_pa12>;
-    pinctrl-names = "default";
 };
+
 
 &gpioc { 
         label = "GPIOC";
