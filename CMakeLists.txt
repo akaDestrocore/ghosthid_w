@@ -1,28 +1,29 @@
 cmake_minimum_required(VERSION 3.20.0)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(ghosthid_w)
+project(usb_hid_proxy)
 
+# Add source files
 target_sources(app PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ch375.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ch375_uart_parity.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ch375_zephyr_glue.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/usb_hid_forwarder.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ch375_usbhost.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/usbhid.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/hid.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/hid_mouse.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/hid/hid_keyboard.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/usb_hid_device.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/auto_gun_press.c
+    src/main.c
+    src/drivers/ch375.c
+    src/drivers/ch375_host.c
+    src/drivers/ch375_uart.c
+    src/hid/hid_parser.c
+    src/hid/hid_mouse.c
+    src/hid/hid_keyboard.c
+    src/usb/composite_hid.c
+    src/auto_gun_press.c
 )
 
+# Add include directories
 target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Enable floating point support for AGP calculations
-target_compile_options(app PRIVATE
-    -fno-strict-aliasing
+# Link against STM32 LL libraries for direct UART access
+# These are needed for 9-bit UART configuration
+zephyr_library_include_directories(
+    ${ZEPHYR_BASE}/modules/hal/stm32/stm32cube/stm32f4xx/drivers/include
+    ${ZEPHYR_BASE}/modules/hal/stm32/stm32cube/stm32f4xx/soc
 )

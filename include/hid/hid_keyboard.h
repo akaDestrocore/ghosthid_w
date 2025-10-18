@@ -1,68 +1,88 @@
+/* HID Keyboard Driver Header for Zephyr */
+
 #ifndef HID_KEYBOARD_H
 #define HID_KEYBOARD_H
 
-#include "hid.h"
-#include "usbhid.h"
+#include <stdint.h>
+#include <zephyr/kernel.h>
+#include "hid_mouse.h"  /* For shared USBHID definitions */
 
+/* HID Keyboard Key Codes */
+#define HID_KBD_LETTER(x) (((x) >= 'a' && (x) <= 'z') ? ((x) - 'a' + 4) : \
+                          ((x) >= 'A' && (x) <= 'Z') ? ((x) - 'A' + 4) : 0)
+#define HID_KBD_NUMBER(x) (((x) >= '1' && (x) <= '9') ? ((x) - '1' + 30) : \
+                          ((x) == '0') ? 39 : 0)
 
-// Keyboard page Usage ID
-// ref: 10 Keyboard/Keypad Page (0x07)
-//      HIDUsageTables1.22.pdf
+/* Special Keys */
+#define HID_KBD_ENTER       0x28
+#define HID_KBD_ESCAPE      0x29
+#define HID_KBD_BACKSPACE   0x2A
+#define HID_KBD_TAB         0x2B
+#define HID_KBD_SPACE       0x2C
+#define HID_KBD_MINUS       0x2D
+#define HID_KBD_EQUAL       0x2E
+#define HID_KBD_LEFT_BRACE  0x2F
+#define HID_KBD_RIGHT_BRACE 0x30
+#define HID_KBD_BACKSLASH   0x31
+#define HID_KBD_SEMICOLON   0x33
+#define HID_KBD_APOSTROPHE  0x34
+#define HID_KBD_GRAVE       0x35
+#define HID_KBD_COMMA       0x36
+#define HID_KBD_DOT         0x37
+#define HID_KBD_SLASH       0x38
+#define HID_KBD_CAPS_LOCK   0x39
 
-// LED
-// Usage: bitmap offset
-#define HID_LED_NUM_LOCK    0x01
-#define HID_LED_CAPS_LOCK   0x02
-#define HID_LED_SCROLL_LOCK 0x03
+/* Function Keys */
+#define HID_KBD_F1          0x3A
+#define HID_KBD_F2          0x3B
+#define HID_KBD_F3          0x3C
+#define HID_KBD_F4          0x3D
+#define HID_KBD_F5          0x3E
+#define HID_KBD_F6          0x3F
+#define HID_KBD_F7          0x40
+#define HID_KBD_F8          0x41
+#define HID_KBD_F9          0x42
+#define HID_KBD_F10         0x43
+#define HID_KBD_F11         0x44
+#define HID_KBD_F12         0x45
 
-// Control Key
-// Usage: bitmap offset = (HID_KBD_LEFT_CTRL & HID_KBD_CTRL_BM_OFF_MASK)
-#define HID_KBD_CTRL_BM_OFF_MASK 0x0F
+/* Control Keys */
 #define HID_KBD_LEFT_CTRL   0xE0
 #define HID_KBD_LEFT_SHIFT  0xE1
 #define HID_KBD_LEFT_ALT    0xE2
-#define HID_KBD_LEFT_GUI    0xE3
+#define HID_KBD_LEFT_META   0xE3
 #define HID_KBD_RIGHT_CTRL  0xE4
 #define HID_KBD_RIGHT_SHIFT 0xE5
 #define HID_KBD_RIGHT_ALT   0xE6
-#define HID_KBD_RIGHT_GUI   0xE7
+#define HID_KBD_RIGHT_META  0xE7
 
-// Normal Key
-// Usage: HID_KBD_LETTER('a'), Just support lowercase.
-#define HID_KBD_LETTER(x) ((uint8_t)((x) - 0x5D))
-// Usage: HID_KBD_NUMBER(1)
-#define HID_KBD_NUMBER(x) ((x) == 0 ? 0x27: ((x) + 0x1D))
-// Usage: HID_KBD_FX(2)
-#define HID_KBD_FX(x) ((uint8_t)((x) + 0x39))
-
-#define HID_KBD_ENTER      0x28
-#define HID_KBD_SPACE      0x2C
-#define HID_KBD_BACKSPACE  0x2A
-// -
-#define HID_KBD_MINUS      0x2D
-// =
-#define HID_KBD_EQUAL      0x2E
-
-
-typedef struct HIDKeyboard_t {
-    USBHID_Device_t *hid_dev;
-    
-    HID_DataDescriptor_t control;
-    HID_DataDescriptor_t led;
-    HID_DataDescriptor_t keycode;
-
+/* HID Keyboard Structure */
+struct hid_keyboard {
+    struct usbhid_device *hid_dev;
     uint32_t report_length;
-} HIDKeyboard_t;
+    
+    /* Modifier keys descriptor */
+    struct hid_data_descriptor modifier;
+    
+    /* Keys descriptor */
+    struct hid_data_descriptor keys;
+};
 
-int hid_keyboard_get_ctrl(HIDKeyboard_t *dev, uint32_t ctrl_code, uint32_t *value, uint8_t is_last);
-int hid_keyboard_set_ctrl(HIDKeyboard_t *dev, uint32_t ctrl_code, uint32_t value, uint8_t is_last);
-int hid_keyboard_get_led(HIDKeyboard_t *dev, uint32_t led_code, uint32_t *value, uint8_t is_last);
-int hid_keyboard_set_led(HIDKeyboard_t *dev, uint32_t led_code, uint32_t value, uint8_t is_last);
-int hid_keyboard_get_key(HIDKeyboard_t *dev, uint32_t key_code, uint32_t *value, uint8_t is_last);
-// int hid_keyboard_set_key(HIDKeyboard_t *dev, uint32_t key_code, uint32_t value, uint8_t is_last);
+/* HID Keyboard Functions */
+int hid_keyboard_open(struct usbhid_device *hid_dev, struct hid_keyboard *keyboard);
+void hid_keyboard_close(struct hid_keyboard *keyboard);
+int hid_keyboard_fetch_report(struct hid_keyboard *keyboard);
 
-int hid_keyboard_fetch_report(HIDKeyboard_t *dev);
-void hid_keyboard_close(HIDKeyboard_t *dev);
-int hid_keyboard_open(USBHID_Device_t *usbhid_dev, HIDKeyboard_t *dev);
+/* Key functions */
+int hid_keyboard_get_key(struct hid_keyboard *keyboard, uint32_t key_code,
+                        uint32_t *value, uint8_t is_last);
+int hid_keyboard_set_key(struct hid_keyboard *keyboard, uint32_t key_code,
+                        uint32_t value, uint8_t is_last);
+
+/* Modifier functions */
+int hid_keyboard_get_modifier(struct hid_keyboard *keyboard, uint32_t modifier,
+                             uint32_t *value, uint8_t is_last);
+int hid_keyboard_set_modifier(struct hid_keyboard *keyboard, uint32_t modifier,
+                             uint32_t value, uint8_t is_last);
 
 #endif /* HID_KEYBOARD_H */
